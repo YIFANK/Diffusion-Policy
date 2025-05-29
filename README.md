@@ -1,0 +1,1 @@
+This is a readme for my implementation of diffusion policy on a simple toy environment.
