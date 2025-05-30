@@ -36,8 +36,10 @@ dataset  = DemoDataset(obs, act)
 print(f"obs shape: {obs.shape}, act shape: {act.shape}")
 policy = DiffusionPolicy(act_dim=act.shape[1],
                          device="cpu")
+policy.load_state_dict(
+    torch.load("output/diffusion_policy.pth", map_location="cpu"))
 
 train_loop(policy, dataset,
-           epochs=50, batch_size=256, device="cpu")
+           epochs=200, batch_size=256, device="cpu")
 
 
