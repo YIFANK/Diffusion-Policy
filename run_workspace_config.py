@@ -22,15 +22,14 @@ info:
     window_width: 512
     seed: 666 # random seed
     window_text: 'Teleop PicknPlace Workspace + Symbolic Observer'
-
 scene_info: 
-    o1: 
-        geometry:
-            shape: 'tee'
-            scale: 30
-        color: 'Pink'
-        position: [350, 350]
-        angle: 0.8
+    o1:
+        geometry: 
+            shape: 'circle'
+            radius: 20
+        color: 'Brown'
+        position: [200, 200] # random position where there is no collision
+        angle: 0.2 # random position where there is no collision
 agent_info: 
     observer:
         type: 'image'

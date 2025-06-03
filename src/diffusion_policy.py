@@ -36,20 +36,20 @@ class MLP(nn.Module):
         return self.seq(x)
     
 class ImageEncoder(nn.Module):
-    """A simple image encoder that downsamples the input image to a fixed size."""
-    def __init__(self, out_dim=512):
+    def __init__(self, out_dim=64):   # << 64 instead of 512
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(3, 32, 3, 2, 1), nn.ReLU(),          # 48×48
-            nn.Conv2d(32, 64, 3, 2, 1), nn.ReLU(),         # 24×24
-            nn.Conv2d(64, 128, 3, 2, 1), nn.ReLU(),        # 12×12
-            nn.AdaptiveAvgPool2d(1),                       # 1×1
-            nn.Flatten(),                                  # 128
-            nn.Linear(128, out_dim),
+            nn.Conv2d(3, 16, 3, 2, 1), nn.SiLU(),   # 96→48
+            nn.Conv2d(16, 32, 3, 2, 1), nn.SiLU(),  # 48→24
+            nn.Conv2d(32, 64, 3, 2, 1), nn.SiLU(),  # 24→12
+            nn.AdaptiveAvgPool2d(1), nn.Flatten(),  # -> 64
+            nn.LayerNorm(64),                      # stabilise
         )
-
-    def forward(self, x):          # x: (B,3,96,96)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, 1, H, W)"""
+        assert x.dim() == 4 and x.size(1) == 3, "Input must be (B, 1, H, W)"
         return self.net(x)
+
 
 class DiffusionPolicy(nn.Module):
     def __init__(
@@ -58,7 +58,7 @@ class DiffusionPolicy(nn.Module):
         n_steps: int = 1000,
         beta_start: float = 1e-4,
         beta_end: float = 2e-2,
-        enc_dim: int = 512,
+        enc_dim: int = 64,
         device: str = "cpu",
     ):
         super().__init__()
@@ -93,7 +93,6 @@ class DiffusionPolicy(nn.Module):
         t = torch.randint(0, self.n_steps, (B,), device=actions.device)
         noise = torch.randn_like(actions)
         x_t = self.q_sample(actions, t, noise)
-
         cond = self.encoder(obs_img)  # (B, enc_dim)
         t_emb = get_timestep_embedding(t, 128)
         eps_in = torch.cat([x_t, cond, t_emb], dim=-1)
