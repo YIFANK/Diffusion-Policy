@@ -1,0 +1,18 @@
+#ignore images, videos, and models
+# Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+# Videos
+*.mp4
+*.avi
+*.mov
+*.gif
+# Models
+*.pth
+*.pt
+*.pkl
+# Logs
+*.log
