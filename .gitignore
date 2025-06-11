@@ -25,5 +25,4 @@ data
 data_local
 .vscode
 _wandb
-
-**/.DS_Store
+.DS_Store
