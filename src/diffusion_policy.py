@@ -60,6 +60,7 @@ class DiffusionPolicy(nn.Module):
         beta_end: float = 2e-2,
         enc_dim: int = 64,
         device: str = "cpu",
+        k_obs: int = 1,  # number of observations to stack
     ):
         super().__init__()
         self.device = device
