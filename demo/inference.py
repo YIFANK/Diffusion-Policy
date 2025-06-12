@@ -86,6 +86,7 @@ from network import ConditionalUnet1D
 from vision_encoder import get_resnet, replace_bn_with_gn
 import torch
 import torch.nn as nn
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 vision_encoder = get_resnet('resnet18')
 vision_encoder = replace_bn_with_gn(vision_encoder)
 
@@ -96,6 +97,8 @@ lowdim_obs_dim = 2
 # observation feature has 514 dims in total per step
 obs_dim = vision_feature_dim + lowdim_obs_dim
 action_dim = 2
+num_diffusion_iters = 100  # number of diffusion steps
+
 def evaluate(max_steps,
             num_episodes = 10,
             model_path: str = '../output/diffusion_policy.pth'):
@@ -112,6 +115,17 @@ def evaluate(max_steps,
         'vision_encoder': vision_encoder,
         'noise_pred_net': noise_pred_net
     })
+
+    noise_scheduler = DDPMScheduler(
+        num_train_timesteps=num_diffusion_iters,
+        # the choise of beta schedule has big impact on performance
+        # we found squared cosine works the best
+        beta_schedule='squaredcos_cap_v2',
+        # clip output to [-1,1] to improve stability
+        clip_sample=True,
+        # our network predicts noise (instead of denoised action)
+        prediction_type='epsilon'
+    )
     #load the model weights
     ema_nets.load_state_dict(torch.load(model_path, map_location=device))
     ema_nets.eval()
@@ -124,7 +138,7 @@ def evaluate(max_steps,
     })
 
     env = ter_env.TEREnv(**cfg.info, scene_info=cfg.scene_info, agent_info=cfg.agent_info)
-
+    tot_score = 0
     for i in range(num_episodes):
         env.reset()
         image_observer = ImageObserver(env, render_size=96, verbose=False)
@@ -229,13 +243,13 @@ def evaluate(max_steps,
                 # and reward/vis
                 rewards.append(reward)
                 imgs.append(obs['image'])
-
                 # update progress bar
                 step_idx += 1
                 if step_idx > max_steps:
                     done = True
                 if done:
                     break
-
-    # print out the maximum target coverage
-    print('Score: ', max(rewards))
+        tot_score += max(rewards)
+        # save the images as a gif
+        images_to_gif(imgs, os.path.join('output', f'episode_{i}.gif'), fps=10)
+    print(f"Total score: {tot_score} over {num_episodes} episodes")

@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 import torchvision
 import collections
-import zarr
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
@@ -120,7 +119,7 @@ noise_scheduler = DDPMScheduler(
 )
 
 # device transfer
-device = torch.device('cuda')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 _ = nets.to(device)
 
 
