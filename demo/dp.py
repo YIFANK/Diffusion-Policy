@@ -90,11 +90,9 @@ class DiffusionPolicy(nn.Module):
         B = 1
         # reshape observation to (B,obs_horizon*obs_dim)
         obs_cond = obs_features.unsqueeze(0).flatten(start_dim=1)
-
-        pred_horizon = 16
         # initialize action from Guassian noise
         noisy_action = torch.randn(
-            (B, pred_horizon, self.action_dim), device=nimages.device)
+            (B, self.pred_horizon, self.action_dim), device=nimages.device)
         naction = noisy_action
 
         # init scheduler

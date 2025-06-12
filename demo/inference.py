@@ -84,7 +84,8 @@ seed = 42
 from dp import DiffusionPolicy
 def evaluate(max_steps,
             num_episodes = 10,
-            model_path: str = '../output/diffusion_policy.pth'):
+            model_path: str = '../output/diffusion_policy.pth',
+            render: bool = False):
     """Evaluate the diffusion policy on the PushTImageEnv."""
     # load the diffusion policy
     diffusion_policy = DiffusionPolicy(
@@ -103,7 +104,9 @@ def evaluate(max_steps,
         "position": [210, 210],
     })
 
-    env = ter_env.TEREnv(**cfg.info, scene_info=cfg.scene_info, agent_info=cfg.agent_info)
+    env = ter_env.TEREnv(**cfg.info, scene_info=cfg.scene_info, agent_info=cfg.agent_info,
+                         verbose = False)
+    collision_handler = env.collision_handler
     tot_score = 0
     for episode in range(num_episodes):
         env.reset()
@@ -120,6 +123,11 @@ def evaluate(max_steps,
             else:
                 reward = 0
                 done = False
+            #check for collisions
+            if collision_handler.is_colliding("agent"):
+                print("Agent is colliding!")
+                reward = -1
+                done = True
             x = {
                 'image': img,
                 'agent_pos': env.agent.position
@@ -188,9 +196,10 @@ def evaluate(max_steps,
                     done = True
                 if done:
                     break
-        tot_score += max(rewards)
+        tot_score += sum(rewards)
         # save the images as a gif
-        images_to_gif(imgs, os.path.join('../output/eval/', f'episode_{episode}.gif'), fps=10)
+        if render:
+            images_to_gif(imgs, os.path.join('../output/eval/', f'episode_{episode}.gif'), fps=10)
     print(f"Total score: {tot_score} over {num_episodes} episodes")
 
 if __name__ == "__main__":
