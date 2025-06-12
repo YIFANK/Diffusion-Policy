@@ -1,26 +1,24 @@
 # policy.py (replace old DiffusionPolicy definition)
 import math, torch, torch.nn as nn, torch.nn.functional as F
 from torchvision.models import resnet18
-from FiLM import EpsNet, sinusoidal_emb
 from network import ConditionalUnet1D
 from vision_encoder import get_resnet, replace_bn_with_gn
-from noise_schedule import cosine_beta_schedule,sigmoid_beta_schedule
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
 class DiffusionPolicy(nn.Module):
-    def __init__(self, obs_horizon, num_diffusion_iters=100):
+    def __init__(self, obs_horizon = 2, pred_horizon = 16,
+                lowdim_obs_dim = 2, action_dim = 2,num_diffusion_iters=100):
         super().__init__()
 
         # vision encoder
         self.vision_encoder = get_resnet('resnet18')
         self.vision_encoder = replace_bn_with_gn(self.vision_encoder)
-
         vision_feature_dim = 512  # resnet18 output
         lowdim_obs_dim = 2
         obs_dim = vision_feature_dim + lowdim_obs_dim
         action_dim = 2
 
-        self.obs_horizon = obs_horizon
+        self.obs_horizon, self.pred_horizon = obs_horizon, pred_horizon
         self.obs_dim = obs_dim
         self.action_dim = action_dim
 
@@ -78,51 +76,47 @@ class DiffusionPolicy(nn.Module):
 
     # -------------- inference -----------------------------------------------
     @torch.no_grad()
-    def predict_action(self, nimages, nagent_poses, num_diffusion_iters=None):
+    def sample(self, nimages, nagent_poses, num_diffusion_iters=None):
         """
         nimages: tensor of shape (obs_horizon, C, H, W)
         nagent_poses: tensor of shape (obs_horizon, 2)
         """
-        device = next(self.parameters()).device
-        B = 1  # single inference sample
-        action_dim = self.action_dim
+        # get image features
+        image_features = self.vision_encoder(nimages)
+        # (2,512)
 
-        # use default num_diffusion_iters if not provided
-        if num_diffusion_iters is None:
-            num_diffusion_iters = self.noise_scheduler.config.num_train_timesteps
-
-        # preprocess batch dim
-        nimages = nimages.unsqueeze(0).to(device)  # (1, obs_horizon, C, H, W)
-        nagent_poses = nagent_poses.unsqueeze(0).to(device)  # (1, obs_horizon, 2)
-
-        # encode vision features
-        image_features = self.vision_encoder(nimages.flatten(end_dim=1))
-        image_features = image_features.reshape(B, self.obs_horizon, -1)
-
-        # concatenate vision features and agent poses
+        # concat with low-dim observations
         obs_features = torch.cat([image_features, nagent_poses], dim=-1)
-        obs_cond = obs_features.flatten(start_dim=1)  # (B, obs_horizon * obs_dim)
+        B = 1
+        # reshape observation to (B,obs_horizon*obs_dim)
+        obs_cond = obs_features.unsqueeze(0).flatten(start_dim=1)
 
-        # initialize action from standard Gaussian noise
-        naction = torch.randn((B, action_dim), device=device)
+        pred_horizon = 16
+        # initialize action from Guassian noise
+        noisy_action = torch.randn(
+            (B, pred_horizon, self.action_dim), device=nimages.device)
+        naction = noisy_action
 
-        # set timesteps for inference
-        self.noise_scheduler.set_timesteps(num_diffusion_iters)
+        # init scheduler
+        noise_scheduler = self.noise_scheduler
+        noise_scheduler.set_timesteps(num_diffusion_iters)
 
-        for k in self.noise_scheduler.timesteps:
+        for k in noise_scheduler.timesteps:
+            # predict noise
             noise_pred = self.noise_pred_net(
                 sample=naction,
                 timestep=k,
                 global_cond=obs_cond
             )
-            naction = self.noise_scheduler.step(
+
+            # inverse diffusion step (remove noise)
+            naction = noise_scheduler.step(
                 model_output=noise_pred,
                 timestep=k,
                 sample=naction
             ).prev_sample
+        return naction
 
-        # output denoised action (remove batch dim)
-        return naction.squeeze(0)
 
 
 

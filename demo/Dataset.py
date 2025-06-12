@@ -13,7 +13,6 @@ def preprocess(dataset_path: str):
         for traj in scene.trajectories:
             states = traj.data
             for state in states:
-                print(state.__dict__.keys())
                 obs_img = state.observation  # this should be shape (96, 96, 3)
                 agent_pos = state.state['agent']['position'] # extract first two dims as agent_pos
                 action = state.action      # (D,) action
@@ -29,6 +28,10 @@ def preprocess(dataset_path: str):
 
     all_states = np.stack(all_states, axis=0)   # (N, 2)
     all_actions = np.stack(all_actions, axis=0) # (N, D)
+    all_images = all_images.astype(np.float32) / 255.0
+    all_states = all_states.astype(np.float32)
+    all_actions = all_actions.astype(np.float32)
+
     episode_ends = np.array(episode_ends)
 
     # Pack into dataset_root format
