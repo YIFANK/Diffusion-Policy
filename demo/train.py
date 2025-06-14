@@ -8,6 +8,7 @@ from diffusers.optimization import get_scheduler
 from Dataset import PushTImageDataset
 import typing
 import wandb
+from visualize_traj import visualize_trajectories
 
 dataset_path = '../output/save_data/test_workspace.pkl'
 model_path = '../output/diffusion_policy.pth'
@@ -43,13 +44,13 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True):
                                        num_diffusion_iters=100)
     diffusion_policy.to(device)
     #load pretrained weights if available
-    # if model_path is not None:
-    #     try:
-    #         state_dict = torch.load(model_path, map_location=device)
-    #         diffusion_policy.load_state_dict(state_dict)
-    #         print(f"Loaded pretrained weights from {model_path}")
-    #     except FileNotFoundError:
-    #         print(f"No pretrained weights found at {model_path}, starting from scratch.")
+    if model_path is not None:
+        try:
+            state_dict = torch.load(model_path, map_location=device)
+            diffusion_policy.load_state_dict(state_dict)
+            print(f"Loaded pretrained weights from {model_path}")
+        except FileNotFoundError:
+            print(f"No pretrained weights found at {model_path}, starting from scratch.")
     # EMA model
     ema = EMAModel(parameters=diffusion_policy.parameters(), power=0.75)
 
@@ -108,16 +109,32 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True):
                     tepoch.set_postfix(loss=loss_cpu)
 
             tglobal.set_postfix(loss=np.mean(epoch_loss))
-            if epoch_idx % 20 == 0:
+            if epoch_idx % 50 == 0:
                 # sample trajectories from the diffusion policy
-                pass
+                nimages = nbatch['image'][:, :obs_horizon].to(device)
+                nagent_poses = nbatch['agent_pos'][:, :obs_horizon].to(device)
+                # get single image
+                nimages = nimages[0]
+                nagent_poses = nagent_poses[0]
+                naction = diffusion_policy.sample(
+                    nimages=nimages,
+                    nagent_poses=nagent_poses,
+                    num_diffusion_iters=100,
+                    n_samples = 10
+                )
+                # unnormalize action
+                naction = naction.detach().to('cpu').numpy()
+                visualize_trajectories(naction, n = 10,gif_path=f"../output/trajectories.gif",)
     # copy EMA weights into model before saving
     ema.copy_to(diffusion_policy.parameters())
 
     # save model
     torch.save(diffusion_policy.state_dict(), model_path)
     print(f"Model saved to {model_path}")
+    del diffusion_policy, ema, optimizer, lr_scheduler  # free memory
+    if logging:
+        wandb.finish()  # finish the wandb run
 
 if __name__ == '__main__':
-    train_diffusion_policy(epochs=1000)  # Adjust epochs as needed
+    train_diffusion_policy(epochs=1000,logging = False)  # Adjust epochs as needed
     print("Training complete.")

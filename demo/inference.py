@@ -12,6 +12,7 @@ import torch
 from img_to_gif import images_to_gif
 import random
 import collections
+from visualize_traj import visualize_trajectories
 
 obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
@@ -108,6 +109,7 @@ def evaluate(max_steps,
                          verbose = False)
     collision_handler = env.collision_handler
     tot_score = 0
+    all_actions = []
     for episode in range(num_episodes):
         env.reset()
         image_observer = ImageObserver(env, render_size=96, verbose=False)
@@ -143,6 +145,7 @@ def evaluate(max_steps,
         rewards = list()
         done = False
         step_idx = 0
+        actions = []
         while not done:
             B = 1
             # stack the last obs_horizon number of observations
@@ -165,11 +168,19 @@ def evaluate(max_steps,
             naction = diffusion_policy.sample(
                 nimages=nimages,
                 nagent_poses=nagent_poses,
-                num_diffusion_iters=100
+                num_diffusion_iters=100,
+                n_samples = 10
             )
-
             # unnormalize action
             naction = naction.detach().to('cpu').numpy()
+            if render:
+                visualize_trajectories(
+                    naction,
+                    n=10,
+                    gif_path=os.path.join('../output/eval/', f'trajectories.gif'),
+                    fps=10,
+                    seed=seed
+                )
             # (B, pred_horizon, action_dim)
             naction = naction[0]
             action_pred = unnormalize_data(naction, stats=stats['action'])
@@ -185,6 +196,7 @@ def evaluate(max_steps,
             for i in range(len(action)):
                 # stepping env
                 obs, reward, done, info = new_step(action[i])
+                actions.append(action[i])
                 # save observations
                 obs_deque.append(obs)
                 # and reward/vis
@@ -197,12 +209,23 @@ def evaluate(max_steps,
                 if done:
                     break
         tot_score += sum(rewards)
+        actions = np.stack(actions)
+        all_actions.append(actions)
         # save the images as a gif
         if render:
             images_to_gif(imgs, os.path.join('../output/eval/', f'episode_{episode}.gif'), fps=10)
+    # if render:
+    #     #padding the last action to make all actions same length
+    #     visualize_trajectories(
+    #         all_actions,
+    #         n=num_episodes,
+    #         gif_path=os.path.join('../output/eval/', 'all_episodes.gif'),
+    #         fps=10,
+    #         seed=seed
+    #     )
     print(f"Total score: {tot_score} over {num_episodes} episodes")
 
 if __name__ == "__main__":
     # evaluate the model
-    evaluate(max_steps=50, num_episodes=10, model_path='../output/diffusion_policy.pth')
+    evaluate(max_steps=50, num_episodes=3, model_path='../output/diffusion_policy.pth',render = True)
     print("Inference completed.")

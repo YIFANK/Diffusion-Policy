@@ -76,24 +76,29 @@ class DiffusionPolicy(nn.Module):
 
     # -------------- inference -----------------------------------------------
     @torch.no_grad()
-    def sample(self, nimages, nagent_poses, num_diffusion_iters=None):
+    def sample(self, nimages, nagent_poses, num_diffusion_iters=None, n_samples=1):
         """
         nimages: tensor of shape (obs_horizon, C, H, W)
         nagent_poses: tensor of shape (obs_horizon, 2)
         """
-        # get image features
-        image_features = self.vision_encoder(nimages)
-        # (2,512)
+        device = nimages.device
+
+        # encode image features
+        image_features = self.vision_encoder(nimages)  # (obs_horizon, 512)
 
         # concat with low-dim observations
-        obs_features = torch.cat([image_features, nagent_poses], dim=-1)
-        B = 1
-        # reshape observation to (B,obs_horizon*obs_dim)
-        obs_cond = obs_features.unsqueeze(0).flatten(start_dim=1)
-        # initialize action from Guassian noise
-        noisy_action = torch.randn(
-            (B, self.pred_horizon, self.action_dim), device=nimages.device)
-        naction = noisy_action
+        obs_features = torch.cat([image_features, nagent_poses], dim=-1)  # (obs_horizon, obs_dim)
+
+        # flatten to (obs_horizon * obs_dim)
+        obs_cond_single = obs_features.flatten(start_dim=0)  # (obs_horizon * obs_dim)
+
+        # repeat condition for n_samples: (n_samples, obs_horizon * obs_dim)
+        obs_cond = obs_cond_single.unsqueeze(0).repeat(n_samples, 1).to(device)
+
+        # initialize Gaussian noise: (n_samples, pred_horizon, action_dim)
+        naction = torch.randn(
+            (n_samples, self.pred_horizon, self.action_dim), device=device
+        )
 
         # init scheduler
         noise_scheduler = self.noise_scheduler
@@ -113,7 +118,8 @@ class DiffusionPolicy(nn.Module):
                 timestep=k,
                 sample=naction
             ).prev_sample
-        return naction
+
+        return naction  # shape: (n_samples, pred_horizon, action_dim)
 
 
 

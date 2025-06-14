@@ -188,7 +188,23 @@ class PushTImageDataset(torch.utils.data.Dataset):
         nsample['image'] = nsample['image'][:self.obs_horizon,:]
         nsample['agent_pos'] = nsample['agent_pos'][:self.obs_horizon,:]
         return nsample
-
+from visualize_traj import visualize_trajectories
 if __name__ == "__main__":
     dataset_path = "../output/save_data/test_workspace.pkl"
-    # preprocess(dataset_path)
+    dataset = PushTImageDataset(
+        dataset_path=dataset_path,
+        pred_horizon=16,
+        obs_horizon=2,
+        action_horizon=8
+    )
+    #visualize trajectories
+    actions = [dataset[i]['action'] for i in range(len(dataset))]
+    actions = np.stack(actions, axis=0)  # (N, pred_horizon, action_dim)
+    print(actions.shape)
+    visualize_trajectories(
+        actions,
+        n=50,
+        gif_path="../output/eval/trajectories.gif",
+        fps=10,
+        seed=42
+    )
