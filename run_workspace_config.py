@@ -11,7 +11,7 @@ workspace_build_yaml = """
 workspace:
     type: 'push'
     'save_directory': 'output/save_data'
-    'save_name': 'test_workspace'
+    'save_name': 'right'
 info:
     render_mode: 'human'
     video_fps: 10
@@ -38,7 +38,7 @@ scene_info:
     #     color: 'Gray'
     #     position: [250, 250]
 agent_info: 
-    position: [210, 210]
+    position: [100, 100]
     observer:
         type: 'image'
         verbose: True

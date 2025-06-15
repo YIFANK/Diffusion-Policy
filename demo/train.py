@@ -5,7 +5,7 @@ import numpy as np
 from dp import DiffusionPolicy
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
-from Dataset import PushTImageDataset
+from Dataset import MergedDataset
 import typing
 import wandb
 from visualize_traj import visualize_trajectories
@@ -17,16 +17,12 @@ obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
 action_dim = 2  # action dimension, e.g. 2 for push task
 action_horizon = 8  # number of actions to output, e.g. 8 for push task
-
+path1 = "../output/save_data/left.pkl"
+path2 = "../output/save_data/right.pkl"
 def train_diffusion_policy(epochs: int = 100,logging : bool = True):
     #load dataset
-    dataset = PushTImageDataset(
-        dataset_path=dataset_path,
-        pred_horizon=pred_horizon,
-        obs_horizon=obs_horizon,
-        action_horizon=action_horizon
-    )
-
+    dataset = MergedDataset(path1,path2, 
+                pred_horizon=16, obs_horizon=2,action_horizon=8)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=64,

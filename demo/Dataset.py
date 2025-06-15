@@ -188,17 +188,51 @@ class PushTImageDataset(torch.utils.data.Dataset):
         nsample['image'] = nsample['image'][:self.obs_horizon,:]
         nsample['agent_pos'] = nsample['agent_pos'][:self.obs_horizon,:]
         return nsample
+    
+class MergedDataset(torch.utils.data.Dataset):
+    def __init__(self, path1,path2, pred_horizon: int,
+                 obs_horizon: int,
+                 action_horizon: int):
+        dataset1 = PushTImageDataset(
+            dataset_path=path1,
+            pred_horizon=pred_horizon,
+            obs_horizon=obs_horizon,
+            action_horizon=action_horizon
+        )
+        dataset2 = PushTImageDataset(
+            dataset_path=path2,
+            pred_horizon=pred_horizon,
+            obs_horizon=obs_horizon,
+            action_horizon=action_horizon
+        )
+        self.datasets = [dataset1, dataset2]
+        self.lengths = [len(d) for d in self.datasets]
+        self.total_length = sum(self.lengths)
+        self.text_conditions = ["left", "right"]  # corresponding text
+
+    def __len__(self):
+        return self.total_length
+
+    def __getitem__(self, idx):
+        if idx < self.lengths[0]:
+            sample = self.datasets[0][idx]
+            dataset_id = 0
+        else:
+            sample = self.datasets[1][idx - self.lengths[0]]
+            dataset_id = 1
+
+        sample["text"] = self.text_conditions[dataset_id]
+        return sample
+
 from visualize_traj import visualize_trajectories
 if __name__ == "__main__":
-    dataset_path = "../output/save_data/test_workspace.pkl"
-    dataset = PushTImageDataset(
-        dataset_path=dataset_path,
-        pred_horizon=16,
-        obs_horizon=2,
-        action_horizon=8
-    )
+    path1 = "../output/save_data/left.pkl"
+    path2 = "../output/save_data/right.pkl"
+    dataset = MergedDataset(path1,path2, 
+                            pred_horizon=16, obs_horizon=2,action_horizon=8)
     #visualize trajectories
-    actions = [dataset[i]['action'] for i in range(len(dataset))]
+
+    actions = [dataset.datasets[0]['action'] for i in range(len(dataset.datasets[0]))]
     actions = np.stack(actions, axis=0)  # (N, pred_horizon, action_dim)
     print(actions.shape)
     visualize_trajectories(
