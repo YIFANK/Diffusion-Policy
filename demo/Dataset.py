@@ -120,44 +120,74 @@ def unnormalize_data(ndata, stats):
 # dataset
 class PushTImageDataset(torch.utils.data.Dataset):
     def __init__(self,
-                 dataset_path: str,
+                 dataset_paths: list,
+                 text_conditions: list,
                  pred_horizon: int,
                  obs_horizon: int,
                  action_horizon: int):
+        
+        assert len(dataset_paths) == len(text_conditions), "Each dataset must have a corresponding text condition."
 
-        # read from zarr dataset
-        dataset_root = preprocess(dataset_path)
+        all_image_data = []
+        all_agent_pos = []
+        all_action = []
+        all_episode_ends = []
+        all_text_conditions = []
 
-        # float32, [0,1], (N,96,96,3)
-        train_image_data = dataset_root['data']['img'][:]
-        train_image_data = np.moveaxis(train_image_data, -1,1)
-        # (N,3,96,96)
+        total_offset = 0  # to track episode ends across datasets
 
-        # (N, D)
+        for dataset_path, text_cond in zip(dataset_paths, text_conditions):
+            dataset_root = preprocess(dataset_path)
+
+            # images
+            image_data = dataset_root['data']['img'][:]  # (N,96,96,3)
+            image_data = np.moveaxis(image_data, -1, 1)  # (N,3,96,96)
+            all_image_data.append(image_data)
+
+            # agent pos and action
+            state_data = dataset_root['data']['state'][:,:2]
+            action_data = dataset_root['data']['action'][:]
+            all_agent_pos.append(state_data)
+            all_action.append(action_data)
+
+            # episode ends
+            episode_ends = dataset_root['meta']['episode_ends'][:] + total_offset
+            all_episode_ends.append(episode_ends)
+            total_offset += state_data.shape[0]
+
+            # text conditions (repeat text_cond for each frame)
+            all_text_conditions.append([text_cond] * state_data.shape[0])
+
+        # concatenate everything
+        all_image_data = np.concatenate(all_image_data, axis=0)
+        all_agent_pos = np.concatenate(all_agent_pos, axis=0)
+        all_action = np.concatenate(all_action, axis=0)
+        all_episode_ends = np.concatenate(all_episode_ends, axis=0)
+        all_text_conditions = sum(all_text_conditions, [])  # flatten list of lists
+
         train_data = {
-            # first two dims of state vector are agent (i.e. gripper) locations
-            'agent_pos': dataset_root['data']['state'][:,:2],
-            'action': dataset_root['data']['action'][:]
+            'agent_pos': all_agent_pos,
+            'action': all_action
         }
-        episode_ends = dataset_root['meta']['episode_ends'][:]
 
-        # compute start and end of each state-action sequence
-        # also handles padding
+        # compute indices
         indices = create_sample_indices(
-            episode_ends=episode_ends,
+            episode_ends=all_episode_ends,
             sequence_length=pred_horizon,
             pad_before=obs_horizon-1,
-            pad_after=action_horizon-1)
+            pad_after=action_horizon-1
+        )
 
-        # compute statistics and normalized data to [-1,1]
+        # compute normalization across the entire dataset
         stats = dict()
         normalized_train_data = dict()
         for key, data in train_data.items():
             stats[key] = get_data_stats(data)
             normalized_train_data[key] = normalize_data(data, stats[key])
 
-        # images are already normalized
-        normalized_train_data['image'] = train_image_data
+        # images stay as they are
+        normalized_train_data['image'] = all_image_data
+        normalized_train_data['text'] = np.array(all_text_conditions)
 
         self.indices = indices
         self.stats = stats
@@ -170,11 +200,8 @@ class PushTImageDataset(torch.utils.data.Dataset):
         return len(self.indices)
 
     def __getitem__(self, idx):
-        # get the start/end indices for this datapoint
-        buffer_start_idx, buffer_end_idx, \
-            sample_start_idx, sample_end_idx = self.indices[idx]
+        buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx = self.indices[idx]
 
-        # get nomralized data using these indices
         nsample = sample_sequence(
             train_data=self.normalized_train_data,
             sequence_length=self.pred_horizon,
@@ -184,55 +211,20 @@ class PushTImageDataset(torch.utils.data.Dataset):
             sample_end_idx=sample_end_idx
         )
 
-        # discard unused observations
-        nsample['image'] = nsample['image'][:self.obs_horizon,:]
-        nsample['agent_pos'] = nsample['agent_pos'][:self.obs_horizon,:]
+        nsample['image'] = nsample['image'][:self.obs_horizon, :]
+        nsample['agent_pos'] = nsample['agent_pos'][:self.obs_horizon, :]
+        nsample['text'] = nsample['text'][0]
         return nsample
-    
-class MergedDataset(torch.utils.data.Dataset):
-    def __init__(self, path1,path2, pred_horizon: int,
-                 obs_horizon: int,
-                 action_horizon: int):
-        dataset1 = PushTImageDataset(
-            dataset_path=path1,
-            pred_horizon=pred_horizon,
-            obs_horizon=obs_horizon,
-            action_horizon=action_horizon
-        )
-        dataset2 = PushTImageDataset(
-            dataset_path=path2,
-            pred_horizon=pred_horizon,
-            obs_horizon=obs_horizon,
-            action_horizon=action_horizon
-        )
-        self.datasets = [dataset1, dataset2]
-        self.lengths = [len(d) for d in self.datasets]
-        self.total_length = sum(self.lengths)
-        self.text_conditions = ["left", "right"]  # corresponding text
 
-    def __len__(self):
-        return self.total_length
-
-    def __getitem__(self, idx):
-        if idx < self.lengths[0]:
-            sample = self.datasets[0][idx]
-            dataset_id = 0
-        else:
-            sample = self.datasets[1][idx - self.lengths[0]]
-            dataset_id = 1
-
-        sample["text"] = self.text_conditions[dataset_id]
-        return sample
 
 from visualize_traj import visualize_trajectories
 if __name__ == "__main__":
     path1 = "../output/save_data/left.pkl"
     path2 = "../output/save_data/right.pkl"
-    dataset = MergedDataset(path1,path2, 
+    dataset = PushTImageDataset([path1,path2], ['left', 'right'],
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
     #visualize trajectories
-
-    actions = [dataset.datasets[0]['action'] for i in range(len(dataset.datasets[0]))]
+    actions = [dataset[i]['action'] for i in range(len(dataset))]
     actions = np.stack(actions, axis=0)  # (N, pred_horizon, action_dim)
     print(actions.shape)
     visualize_trajectories(

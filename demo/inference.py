@@ -12,7 +12,7 @@ import torch
 from img_to_gif import images_to_gif
 import random
 import collections
-from visualize_traj import visualize_trajectories
+from visualize_traj import visualize_trajectories, pad_and_stack_trajectories
 
 obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
@@ -51,12 +51,11 @@ base_yaml = """
             type: 'image'
             verbose: True
     """
+def random_pos():
+    # Make sure to keep values within a safe region
+    return [random.randint(150, 250), random.randint(150,250)]
 def generate_random_scene(seed: int,num_objects: int = 1,rand: bool = False):
     random.seed(seed)
-    
-    def random_pos():
-        # Make sure to keep values within a safe region
-        return [random.randint(100, 400), random.randint(100,400)]
     if num_objects > 2:
         print("Warning: num_objects > 2, only 2 objects are supported in this example.")
     if num_objects == 1:
@@ -69,6 +68,10 @@ def generate_random_scene(seed: int,num_objects: int = 1,rand: bool = False):
             scene["o1"]['position'] = random_pos()
             scene["o2"]['position'] = random_pos()
     return scene
+def generate_random_position():
+    """Generate a random position within the workspace."""
+    pos = random_pos()
+    return pos
 
 from Dataset import PushTImageDataset, normalize_data, unnormalize_data
 dataset_path = '../output/save_data/test_workspace.pkl'
@@ -101,16 +104,13 @@ def evaluate(max_steps,
     cfg = OmegaConf.create(base_yaml)
     cfg.info.seed = seed
     cfg.scene_info = OmegaConf.create(generate_random_scene(seed))
-    cfg.agent_info = OmegaConf.create({
-        "position": [210, 210],
-    })
-
-    env = ter_env.TEREnv(**cfg.info, scene_info=cfg.scene_info, agent_info=cfg.agent_info,
-                         verbose = False)
-    collision_handler = env.collision_handler
     tot_score = 0
     all_actions = []
     for episode in range(num_episodes):
+        cfg.agent_info.position = generate_random_position()
+        env = ter_env.TEREnv(**cfg.info, scene_info=cfg.scene_info, agent_info=cfg.agent_info,
+                             verbose = False)
+        collision_handler = env.collision_handler
         env.reset()
         image_observer = ImageObserver(env, render_size=96, verbose=False)
         def new_step(action):
@@ -163,24 +163,23 @@ def evaluate(max_steps,
             # (2,3,96,96)
             nagent_poses = torch.from_numpy(nagent_poses).to(device, dtype=torch.float32)
             # (2,2)
-
             # sample actions from the diffusion policy
             naction = diffusion_policy.sample(
                 nimages=nimages,
                 nagent_poses=nagent_poses,
                 num_diffusion_iters=100,
-                n_samples = 10
+                n_samples = 1
             )
             # unnormalize action
             naction = naction.detach().to('cpu').numpy()
-            if render:
-                visualize_trajectories(
-                    naction,
-                    n=10,
-                    gif_path=os.path.join('../output/eval/', f'trajectories.gif'),
-                    fps=10,
-                    seed=seed
-                )
+            # if render:
+            #     visualize_trajectories(
+            #         naction,
+            #         n=10,
+            #         gif_path=os.path.join('../output/eval/', f'trajectories.gif'),
+            #         fps=10,
+            #         seed=seed
+            #     )
             # (B, pred_horizon, action_dim)
             naction = naction[0]
             action_pred = unnormalize_data(naction, stats=stats['action'])
@@ -196,7 +195,7 @@ def evaluate(max_steps,
             for i in range(len(action)):
                 # stepping env
                 obs, reward, done, info = new_step(action[i])
-                actions.append(action[i])
+                actions.append(normalize_data(action[i],stats = stats['action']))
                 # save observations
                 obs_deque.append(obs)
                 # and reward/vis
@@ -212,20 +211,21 @@ def evaluate(max_steps,
         actions = np.stack(actions)
         all_actions.append(actions)
         # save the images as a gif
-        if render:
-            images_to_gif(imgs, os.path.join('../output/eval/', f'episode_{episode}.gif'), fps=10)
-    # if render:
-    #     #padding the last action to make all actions same length
-    #     visualize_trajectories(
-    #         all_actions,
-    #         n=num_episodes,
-    #         gif_path=os.path.join('../output/eval/', 'all_episodes.gif'),
-    #         fps=10,
-    #         seed=seed
-    #     )
+        # if render:
+        #     images_to_gif(imgs, os.path.join('../output/eval/', f'episode_{episode}.gif'), fps=10)
+    if render:
+        #padding the last action to make all actions same length
+        trajs = pad_and_stack_trajectories(all_actions)
+        visualize_trajectories(
+            trajs,
+            n=num_episodes,
+            gif_path=os.path.join('../output/eval/', 'all_episodes.gif'),
+            fps=10,
+            seed=seed
+        )
     print(f"Total score: {tot_score} over {num_episodes} episodes")
 
 if __name__ == "__main__":
     # evaluate the model
-    evaluate(max_steps=50, num_episodes=3, model_path='../output/diffusion_policy.pth',render = True)
+    evaluate(max_steps=50, num_episodes=30, model_path='../output/diffusion_policy.pth',render = True)
     print("Inference completed.")

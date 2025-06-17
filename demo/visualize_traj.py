@@ -9,13 +9,29 @@ from matplotlib import rcParams
 from PIL import Image
 
 
-def _fig_to_pil(fig) -> Image.Image:
-    """Convert a Matplotlib figure to a PIL image."""
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", pad_inches=0.05)
-    plt.close(fig)
-    buf.seek(0)
-    return Image.open(buf).convert("RGB")
+def pad_and_stack_trajectories(trajectories):
+    """
+    trajectories: list of np.ndarray with shape (Ti, action_dim)
+    returns: torch.Tensor of shape (N, T_max, action_dim)
+    """
+    # get max length
+    max_len = max(traj.shape[0] for traj in trajectories)
+    action_dim = trajectories[0].shape[1]
+    
+    padded = []
+    for traj in trajectories:
+        T = traj.shape[0]
+        pad_len = max_len - T
+        if pad_len > 0:
+            # pad with last action
+            pad = np.repeat(traj[-1:].copy(), pad_len, axis=0)
+            padded_traj = np.concatenate([traj, pad], axis=0)
+        else:
+            padded_traj = traj
+        padded.append(padded_traj)
+    
+    padded_array = np.stack(padded)  # (N, T_max, action_dim)
+    return torch.tensor(padded_array, dtype=torch.float32)
 
 
 def _fig_to_pil(fig):

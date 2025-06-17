@@ -13,15 +13,7 @@ class SimpleTextEncoder(nn.Module):
         texts: list of strings, length B
         returns: tensor of shape (B, 1)
         """
-        embeddings = []
-        for text in texts:
-            if "left" in text.lower():
-                embeddings.append(-1.0)
-            elif "right" in text.lower():
-                embeddings.append(1.0)
-            else:
-                embeddings.append(0.0)
-        return torch.tensor(embeddings, dtype=torch.float32).unsqueeze(1)
+        return texts
     
 class DiffusionPolicy(nn.Module):
     def __init__(self, obs_horizon = 2, pred_horizon = 16,
@@ -44,7 +36,7 @@ class DiffusionPolicy(nn.Module):
             text_feature_dim = 1
             #encode left as -1, right as 1, and none as 0
             self.text_encoder = SimpleTextEncoder()
-        obs_dim = vision_feature_dim + lowdim_obs_dim + text_feature_dim
+        obs_dim = vision_feature_dim + lowdim_obs_dim
         lowdim_obs_dim = 2
         action_dim = 2
 
@@ -55,9 +47,8 @@ class DiffusionPolicy(nn.Module):
         # noise prediction network
         self.noise_pred_net = ConditionalUnet1D(
             input_dim=action_dim,
-            global_cond_dim=obs_dim * obs_horizon
+            global_cond_dim=obs_dim * obs_horizon + text_feature_dim
         )
-
         # diffusion noise scheduler
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=num_diffusion_iters,
@@ -71,6 +62,7 @@ class DiffusionPolicy(nn.Module):
         nimage: shape (B, obs_horizon, C, H, W)
         nagent_pos: shape (B, obs_horizon, 2)
         naction: shape (B, 2)
+        ntext: shape (B, 1)
         """
         B = nimage.shape[0]
 
@@ -81,7 +73,6 @@ class DiffusionPolicy(nn.Module):
 
             # Concatenate with low-dim observations
             obs_features = torch.cat([image_features, nagent_pos], dim=-1)
-            obs_cond = obs_features.flatten(start_dim=1)  # (B, obs_horizon * obs_dim)
         else:
             obs_features = nagent_pos
         obs_cond = obs_features.flatten(start_dim = 1)
@@ -89,7 +80,6 @@ class DiffusionPolicy(nn.Module):
         if self.text:
             # encode text (assume frozen encoder)
             text_emb = self.text_encoder(ntext)  # (B, text_emb_dim)
-
             # classifier-free guidance: randomly drop text conditioning
             mask = (torch.rand(B, device=naction.device) > p_uncond).float().unsqueeze(1)
             text_emb = text_emb * mask  # zero out some text conditions
@@ -120,45 +110,71 @@ class DiffusionPolicy(nn.Module):
 
     # -------------- inference -----------------------------------------------
     @torch.no_grad()
-    def sample(self, nimages, nagent_poses, num_diffusion_iters=None, n_samples=1):
+    def sample(self, nimages, nagent_poses, ntexts=None, num_diffusion_iters=None, n_samples=1, guidance_scale=1.5):
         """
-        nimages: tensor of shape (obs_horizon, C, H, W)
-        nagent_poses: tensor of shape (obs_horizon, 2)
+        nimages: (obs_horizon, C, H, W)
+        nagent_poses: (obs_horizon, 2)
+        ntexts: (obs_horizon, 1)
         """
-        device = nimages.device
+        device = next(self.parameters()).device
 
+        # ---- Vision encoding ----
         if self.vision:
             image_features = self.vision_encoder(nimages)  # (obs_horizon, 512)
             obs_features = torch.cat([image_features, nagent_poses], dim=-1)  # (obs_horizon, obs_dim)
         else:
-            obs_features = nagent_poses  # (obs_horizon, 2)
+            obs_features = nagent_poses
 
-        obs_cond_single = obs_features.flatten(start_dim=0)
-        obs_cond = obs_cond_single.unsqueeze(0).repeat(n_samples, 1).to(device)
-        # initialize Gaussian noise: (n_samples, pred_horizon, action_dim)
-        naction = torch.randn(
-            (n_samples, self.pred_horizon, self.action_dim), device=device
-        )
-        # init scheduler
+        obs_cond_base = obs_features.flatten(start_dim=0).unsqueeze(0).repeat(n_samples, 1).to(device)
+
+        # ---- Text encoding ----
+        if self.text:
+            text_emb = self.text_encoder(ntexts)  # assume (B, text_dim) or (1, text_dim)
+            text_emb = text_emb.repeat(n_samples, 1).to(device)
+            text_emb_zero = torch.zeros_like(text_emb)
+            obs_cond_cond = torch.cat([obs_cond_base, text_emb], dim=-1)
+            obs_cond_uncond = torch.cat([obs_cond_base, text_emb_zero], dim=-1)
+        else:
+            obs_cond_cond = obs_cond_base
+            obs_cond_uncond = obs_cond_base
+
+        # ---- Initialize Gaussian noise ----
+        naction = torch.randn((n_samples, self.pred_horizon, self.action_dim), device=device)
+
+        # ---- Prepare scheduler ----
         noise_scheduler = self.noise_scheduler
+        if num_diffusion_iters is None:
+            num_diffusion_iters = noise_scheduler.config.num_train_timesteps
         noise_scheduler.set_timesteps(num_diffusion_iters)
 
+        # ---- DDPM sampling loop with CFG ----
         for k in noise_scheduler.timesteps:
-            # predict noise
-            noise_pred = self.noise_pred_net(
+            # conditional prediction
+            eps_cond = self.noise_pred_net(
                 sample=naction,
                 timestep=k,
-                global_cond=obs_cond
+                global_cond=obs_cond_cond
             )
 
-            # inverse diffusion step (remove noise)
+            # unconditional prediction
+            eps_uncond = self.noise_pred_net(
+                sample=naction,
+                timestep=k,
+                global_cond=obs_cond_uncond
+            )
+
+            # classifier-free guidance interpolation
+            eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+
+            # diffusion step
             naction = noise_scheduler.step(
-                model_output=noise_pred,
+                model_output=eps,
                 timestep=k,
                 sample=naction
             ).prev_sample
 
-        return naction  # shape: (n_samples, pred_horizon, action_dim)
+        return naction  # (n_samples, pred_horizon, action_dim)
+
 
 
 
