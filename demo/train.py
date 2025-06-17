@@ -19,11 +19,9 @@ action_dim = 2  # action dimension, e.g. 2 for push task
 action_horizon = 8  # number of actions to output, e.g. 8 for push task
 path1 = "../output/save_data/left.pkl"
 path2 = "../output/save_data/right.pkl"
-
-def train_diffusion_policy(epochs: int = 100,logging : bool = True,
-                           text_obs: bool = False, img_obs: bool = False):
+def train_diffusion_policy(epochs: int = 100,logging : bool = True):
     #load dataset
-    dataset = PushTImageDataset([path1,path2], [-1,1],
+    dataset = PushTImageDataset([path1,path2],[-1,1], 
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -39,18 +37,16 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True,
     diffusion_policy = DiffusionPolicy(obs_horizon=obs_horizon, pred_horizon=pred_horizon,
                                        lowdim_obs_dim=2,
                                        action_dim=action_dim,
-                                       num_diffusion_iters=100,
-                                       vision = img_obs,
-                                       text = text_obs)
+                                       num_diffusion_iters=100)
     diffusion_policy.to(device)
     #load pretrained weights if available
-    # if model_path is not None:
-    #     try:
-    #         state_dict = torch.load(model_path, map_location=device)
-    #         diffusion_policy.load_state_dict(state_dict)
-    #         print(f"Loaded pretrained weights from {model_path}")
-    #     except FileNotFoundError:
-    #         print(f"No pretrained weights found at {model_path}, starting from scratch.")
+    if model_path is not None:
+        try:
+            state_dict = torch.load(model_path, map_location=device)
+            diffusion_policy.load_state_dict(state_dict)
+            print(f"Loaded pretrained weights from {model_path}")
+        except FileNotFoundError:
+            print(f"No pretrained weights found at {model_path}, starting from scratch.")
     # EMA model
     ema = EMAModel(parameters=diffusion_policy.parameters(), power=0.75)
 
@@ -113,7 +109,7 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True,
                 # sample trajectories from the diffusion policy
                 nimages = nbatch['image'][0, :obs_horizon].to(device)
                 nagent_poses = nbatch['agent_pos'][0, :obs_horizon].to(device)
-                ntexts = nbatch['text'][:obs_horizon].to(device).unsqueeze(-1)
+                ntexts = nbatch['text'][0]  # no slicing needed for text
 
                 naction = diffusion_policy.sample(
                     nimages=nimages,
@@ -122,9 +118,18 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True,
                     num_diffusion_iters=100,
                     n_samples = 10
                 )
+
+                uncond_naction = diffusion_policy.sample(
+                    nimages=nimages,
+                    nagent_poses=nagent_poses,
+                    num_diffusion_iters=100,
+                    n_samples = 10
+                )
                 # unnormalize action
                 naction = naction.detach().to('cpu').numpy()
-                visualize_trajectories(naction, n = 10,gif_path=f"../output/trajectories.gif",)
+                uncond_naction = uncond_naction.detach().to('cpu').numpy()
+                visualize_trajectories(naction, n = 10,gif_path=f"../output/{ntexts}_trajectories.gif",)
+                visualize_trajectories(uncond_naction, n = 10,gif_path=f"../output/uncond_trajectories.gif",)
     # copy EMA weights into model before saving
     ema.copy_to(diffusion_policy.parameters())
 
@@ -136,5 +141,5 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True,
         wandb.finish()  # finish the wandb run
 
 if __name__ == '__main__':
-    train_diffusion_policy(epochs=500,logging = False,text_obs = True)  # Adjust epochs as needed
+    train_diffusion_policy(epochs=1000,logging = True)  # Adjust epochs as needed
     print("Training complete.")

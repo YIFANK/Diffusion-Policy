@@ -18,7 +18,7 @@ class SimpleTextEncoder(nn.Module):
 class DiffusionPolicy(nn.Module):
     def __init__(self, obs_horizon = 2, pred_horizon = 16,
                 lowdim_obs_dim = 2, action_dim = 2,num_diffusion_iters=100,
-                vision = False,text = False):
+                vision = False,text = True):
         super().__init__()
 
         # vision encoder
@@ -49,6 +49,7 @@ class DiffusionPolicy(nn.Module):
             input_dim=action_dim,
             global_cond_dim=obs_dim * obs_horizon + text_feature_dim
         )
+
         # diffusion noise scheduler
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=num_diffusion_iters,
@@ -73,6 +74,7 @@ class DiffusionPolicy(nn.Module):
 
             # Concatenate with low-dim observations
             obs_features = torch.cat([image_features, nagent_pos], dim=-1)
+            obs_cond = obs_features.flatten(start_dim=1)  # (B, obs_horizon * obs_dim)
         else:
             obs_features = nagent_pos
         obs_cond = obs_features.flatten(start_dim = 1)
@@ -80,8 +82,10 @@ class DiffusionPolicy(nn.Module):
         if self.text:
             # encode text (assume frozen encoder)
             text_emb = self.text_encoder(ntext)  # (B, text_emb_dim)
+
             # classifier-free guidance: randomly drop text conditioning
             mask = (torch.rand(B, device=naction.device) > p_uncond).float().unsqueeze(1)
+            # print(text_emb.shape,mask.shape)
             text_emb = text_emb * mask  # zero out some text conditions
 
             # concatenate text embedding into condition
@@ -114,7 +118,7 @@ class DiffusionPolicy(nn.Module):
         """
         nimages: (obs_horizon, C, H, W)
         nagent_poses: (obs_horizon, 2)
-        ntexts: (obs_horizon, 1)
+        ntexts: (1,)
         """
         device = next(self.parameters()).device
 
@@ -129,6 +133,8 @@ class DiffusionPolicy(nn.Module):
 
         # ---- Text encoding ----
         if self.text:
+            if ntexts is None:
+                ntexts = torch.zeros(1)
             text_emb = self.text_encoder(ntexts)  # assume (B, text_dim) or (1, text_dim)
             text_emb = text_emb.repeat(n_samples, 1).to(device)
             text_emb_zero = torch.zeros_like(text_emb)

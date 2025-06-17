@@ -213,18 +213,19 @@ class PushTImageDataset(torch.utils.data.Dataset):
 
         nsample['image'] = nsample['image'][:self.obs_horizon, :]
         nsample['agent_pos'] = nsample['agent_pos'][:self.obs_horizon, :]
-        nsample['text'] = nsample['text'][0]
+        nsample['text'] = nsample['text'][0]  # text is constant for entire sequence
+
         return nsample
-
-
+    
 from visualize_traj import visualize_trajectories
 if __name__ == "__main__":
     path1 = "../output/save_data/left.pkl"
     path2 = "../output/save_data/right.pkl"
-    dataset = PushTImageDataset([path1,path2], ['left', 'right'],
+    dataset = PushTImageDataset([path1,path2],[-1,1], 
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
     #visualize trajectories
-    actions = [dataset[i]['action'] for i in range(len(dataset))]
+
+    actions = [dataset['action'] for i in range(len(dataset))]
     actions = np.stack(actions, axis=0)  # (N, pred_horizon, action_dim)
     print(actions.shape)
     visualize_trajectories(
