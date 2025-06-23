@@ -1,9 +1,11 @@
 # policy.py (replace old DiffusionPolicy definition)
 import math, torch, torch.nn as nn, torch.nn.functional as F
 from torchvision.models import resnet18
-from network import ConditionalUnet1D
-from vision_encoder import get_resnet, replace_bn_with_gn
+from .network import ConditionalUnet1D
+from .vision_encoder import get_resnet, replace_bn_with_gn
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from typing import Optional, Tuple, Dict
+
 class SimpleTextEncoder(nn.Module):
     def __init__(self):
         super().__init__()
@@ -11,11 +13,31 @@ class SimpleTextEncoder(nn.Module):
     def forward(self, texts):
         """
         texts: list of strings, length B
-        returns: tensor of shape (B, 1)
+        returns: tensor of shape (B, 64)
         """
-        return texts
+        if torch.is_tensor(texts):
+            # If already a tensor, ensure it's float32
+            return texts.float()
+        else:
+            # Convert to tensor and ensure float32
+            return torch.tensor(texts, dtype=torch.float32)
     
 class DiffusionPolicy(nn.Module):
+    """
+    Diffusion Policy for visuomotor control.
+    
+    Implements DDPM-based action generation conditioned on visual observations,
+    low-dimensional state, and optional text conditioning.
+    
+    Args:
+        obs_horizon: Number of observation steps to condition on
+        pred_horizon: Number of action steps to predict  
+        lowdim_obs_dim: Dimension of low-dimensional observations
+        action_dim: Dimension of action space
+        num_diffusion_iters: Number of diffusion denoising steps
+        vision: Whether to use vision encoder
+        text: Whether to use text conditioning
+    """
     def __init__(self, obs_horizon = 2, pred_horizon = 16,
                 lowdim_obs_dim = 2, action_dim = 2,num_diffusion_iters=100,
                 vision = False,text = True):
@@ -33,8 +55,8 @@ class DiffusionPolicy(nn.Module):
             # self.text_encoder = AutoModel.from_pretrained('bert-base-uncased')
             # for param in self.text_encoder.parameters():
             #     param.requires_grad = False  # freeze
-            text_feature_dim = 1
-            #encode left as -1, right as 1, and none as 0
+            text_feature_dim = 64
+            #encode left and right as 64-dim random gaussian variables
             self.text_encoder = SimpleTextEncoder()
         obs_dim = vision_feature_dim + lowdim_obs_dim
         lowdim_obs_dim = 2
@@ -63,7 +85,7 @@ class DiffusionPolicy(nn.Module):
         nimage: shape (B, obs_horizon, C, H, W)
         nagent_pos: shape (B, obs_horizon, 2)
         naction: shape (B, 2)
-        ntext: shape (B, 1)
+        ntext: shape (B, 64)
         """
         B = nimage.shape[0]
 
@@ -114,12 +136,14 @@ class DiffusionPolicy(nn.Module):
 
     # -------------- inference -----------------------------------------------
     @torch.no_grad()
-    def sample(self, nimages, nagent_poses, ntexts=None, num_diffusion_iters=None, n_samples=1, guidance_scale=1.5):
-        """
-        nimages: (obs_horizon, C, H, W)
-        nagent_poses: (obs_horizon, 2)
-        ntexts: (1,)
-        """
+    def sample(self, 
+              nimages: torch.Tensor,
+              nagent_poses: torch.Tensor, 
+              ntexts: Optional[torch.Tensor] = None,
+              num_diffusion_iters: Optional[int] = None,
+              n_samples: int = 1,
+              guidance_scale: float = 1.5) -> torch.Tensor:
+        """Sample actions from the diffusion policy."""
         device = next(self.parameters()).device
 
         # ---- Vision encoding ----
@@ -134,7 +158,7 @@ class DiffusionPolicy(nn.Module):
         # ---- Text encoding ----
         if self.text:
             if ntexts is None:
-                ntexts = torch.zeros(1)
+                ntexts = torch.zeros(64)
             text_emb = self.text_encoder(ntexts)  # assume (B, text_dim) or (1, text_dim)
             text_emb = text_emb.repeat(n_samples, 1).to(device)
             text_emb_zero = torch.zeros_like(text_emb)

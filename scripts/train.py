@@ -2,13 +2,13 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
-from dp import DiffusionPolicy
+from diffusion_policy.models.diffusion_policy import DiffusionPolicy
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
-from Dataset import PushTImageDataset
+from diffusion_policy.data.dataset import PushTImageDataset
 import typing
 import wandb
-from visualize_traj import visualize_trajectories
+from diffusion_policy.utils.visualization import visualize_trajectories
 
 dataset_path = '../output/save_data/test_workspace.pkl'
 model_path = '../output/diffusion_policy.pth'
@@ -21,7 +21,7 @@ path1 = "../output/save_data/left.pkl"
 path2 = "../output/save_data/right.pkl"
 def train_diffusion_policy(epochs: int = 100,logging : bool = True):
     #load dataset
-    dataset = PushTImageDataset([path1,path2],[-1,1], 
+    dataset = PushTImageDataset([path1,path2],np.load("../output/save_data/embeddings.npy"), 
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -40,13 +40,13 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True):
                                        num_diffusion_iters=100)
     diffusion_policy.to(device)
     #load pretrained weights if available
-    if model_path is not None:
-        try:
-            state_dict = torch.load(model_path, map_location=device)
-            diffusion_policy.load_state_dict(state_dict)
-            print(f"Loaded pretrained weights from {model_path}")
-        except FileNotFoundError:
-            print(f"No pretrained weights found at {model_path}, starting from scratch.")
+    # if model_path is not None:
+    #     try:
+    #         state_dict = torch.load(model_path, map_location=device)
+    #         diffusion_policy.load_state_dict(state_dict)
+    #         print(f"Loaded pretrained weights from {model_path}")
+    #     except FileNotFoundError:
+    #         print(f"No pretrained weights found at {model_path}, starting from scratch.")
     # EMA model
     ema = EMAModel(parameters=diffusion_policy.parameters(), power=0.75)
 
@@ -65,7 +65,7 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True):
     if logging:
         wandb.init(
             project="Diffusion Policy",  # give your project a name
-            name="working policy",              # (optional) name of the specific run
+            name="Policy with simple text conditioning",              # (optional) name of the specific run
             config={
                 "epochs": epochs,
                 "learning_rate": 1e-4,
@@ -85,7 +85,7 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True):
                     nimage = nbatch['image'][:, :obs_horizon].to(device)
                     nagent_pos = nbatch['agent_pos'][:, :obs_horizon].to(device)
                     naction = nbatch['action'].to(device)
-                    ntext = nbatch['text'].to(device).unsqueeze(-1)
+                    ntext = nbatch['text'].to(device)
                     # call forward() to compute loss
                     loss = diffusion_policy(nimage, nagent_pos, naction, ntext)
                     if logging:
@@ -105,7 +105,7 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True):
                     tepoch.set_postfix(loss=loss_cpu)
 
             tglobal.set_postfix(loss=np.mean(epoch_loss))
-            if epoch_idx % 50 == 0:
+            if (epoch_idx+1) % 100 == 0:
                 # sample trajectories from the diffusion policy
                 nimages = nbatch['image'][0, :obs_horizon].to(device)
                 nagent_poses = nbatch['agent_pos'][0, :obs_horizon].to(device)
@@ -128,7 +128,7 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True):
                 # unnormalize action
                 naction = naction.detach().to('cpu').numpy()
                 uncond_naction = uncond_naction.detach().to('cpu').numpy()
-                visualize_trajectories(naction, n = 10,gif_path=f"../output/{ntexts}_trajectories.gif",)
+                visualize_trajectories(naction, n = 10,gif_path=f"../output/cond_trajectories.gif",)
                 visualize_trajectories(uncond_naction, n = 10,gif_path=f"../output/uncond_trajectories.gif",)
     # copy EMA weights into model before saving
     ema.copy_to(diffusion_policy.parameters())
@@ -141,5 +141,5 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True):
         wandb.finish()  # finish the wandb run
 
 if __name__ == '__main__':
-    train_diffusion_policy(epochs=1000,logging = True)  # Adjust epochs as needed
+    train_diffusion_policy(epochs=5000,logging = True)  # Adjust epochs as needed
     print("Training complete.")

@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diffusion-policy"
+version = "0.1.0"
+description = "A PyTorch implementation of diffusion models for robotic control"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Yifan", email = "your.email@example.com"}
+]
+keywords = ["robotics", "diffusion models", "pytorch", "reinforcement learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=1.9.0",
+    "torchvision>=0.10.0",
+    "diffusers>=0.20.0",
+    "numpy>=1.21.0",
+    "matplotlib>=3.4.0",
+    "imageio[ffmpeg]>=2.9.0",
+    "pygame>=2.0.0",
+    "tqdm>=4.62.0",
+    "wandb>=0.12.0",
+    "omegaconf>=2.1.0",
+    "tiny-embodied-reasoning",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter>=1.0.0",
+    "pytest>=6.0.0",
+    "black>=21.0.0",
+    "flake8>=3.9.0",
+    "pre-commit>=2.15.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-username/diffusion-policy"
+Repository = "https://github.com/your-username/diffusion-policy"
+Documentation = "https://github.com/your-username/diffusion-policy#readme"
+
+[project.scripts]
+train-diffusion-policy = "scripts.train:main"
+evaluate-diffusion-policy = "scripts.inference:main"
+
+[tool.setuptools.packages.find]
+include = ["diffusion_policy*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203", "W503"] 

@@ -9,10 +9,11 @@ from tiny_embodied_reasoning.environment import env as ter_env
 import numpy as np
 from tiny_embodied_reasoning.observers.observer import StateObserver, ImageObserver
 import torch
-from img_to_gif import images_to_gif
+from diffusion_policy.utils.img_to_gif import images_to_gif
 import random
 import collections
-from visualize_traj import visualize_trajectories, pad_and_stack_trajectories
+from diffusion_policy.utils.visualization import visualize_trajectories, pad_and_stack_trajectories
+from diffusion_policy.data.dataset import PushTImageDataset, normalize_data, unnormalize_data
 
 obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
@@ -53,7 +54,7 @@ base_yaml = """
     """
 def random_pos():
     # Make sure to keep values within a safe region
-    return [random.randint(150, 250), random.randint(150,250)]
+    return [random.randint(80, 120), random.randint(80,120)]
 def generate_random_scene(seed: int,num_objects: int = 1,rand: bool = False):
     random.seed(seed)
     if num_objects > 2:
@@ -73,23 +74,21 @@ def generate_random_position():
     pos = random_pos()
     return pos
 
-from Dataset import PushTImageDataset, normalize_data, unnormalize_data
 dataset_path = '../output/save_data/test_workspace.pkl'
-dataset = PushTImageDataset(
-    dataset_path=dataset_path,
-    pred_horizon=pred_horizon,
-    obs_horizon=obs_horizon,
-    action_horizon=action_horizon
-)
+path1 = "../output/save_data/left.pkl"
+path2 = "../output/save_data/right.pkl"
+dataset = PushTImageDataset([path1,path2],[-1,1], 
+                            pred_horizon=16, obs_horizon=2,action_horizon=8)
 stats = dataset.stats
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 seed = 42
 
-from dp import DiffusionPolicy
+from diffusion_policy.models.diffusion_policy import DiffusionPolicy
 def evaluate(max_steps,
             num_episodes = 10,
             model_path: str = '../output/diffusion_policy.pth',
-            render: bool = False):
+            render: bool = False,
+            cond: int = -1):
     """Evaluate the diffusion policy on the PushTImageEnv."""
     # load the diffusion policy
     diffusion_policy = DiffusionPolicy(
@@ -106,7 +105,7 @@ def evaluate(max_steps,
     cfg.scene_info = OmegaConf.create(generate_random_scene(seed))
     tot_score = 0
     all_actions = []
-    for episode in range(num_episodes):
+    for episode in range(1,num_episodes+1):
         cfg.agent_info.position = generate_random_position()
         env = ter_env.TEREnv(**cfg.info, scene_info=cfg.scene_info, agent_info=cfg.agent_info,
                              verbose = False)
@@ -167,16 +166,24 @@ def evaluate(max_steps,
             naction = diffusion_policy.sample(
                 nimages=nimages,
                 nagent_poses=nagent_poses,
+                ntexts = cond,
                 num_diffusion_iters=100,
-                n_samples = 1
+                n_samples = 10
             )
             # unnormalize action
             naction = naction.detach().to('cpu').numpy()
             # if render:
             #     visualize_trajectories(
-            #         naction,
+            #         left_naction,
             #         n=10,
-            #         gif_path=os.path.join('../output/eval/', f'trajectories.gif'),
+            #         gif_path=os.path.join('../output/eval/', f'left_trajectories_{step_idx}.gif'),
+            #         fps=10,
+            #         seed=seed
+            #     )
+            #     visualize_trajectories(
+            #         right_naction,
+            #         n=10,
+            #         gif_path=os.path.join('../output/eval/', f'right_trajectories_{step_idx}.gif'),
             #         fps=10,
             #         seed=seed
             #     )
@@ -211,8 +218,9 @@ def evaluate(max_steps,
         actions = np.stack(actions)
         all_actions.append(actions)
         # save the images as a gif
-        # if render:
-        #     images_to_gif(imgs, os.path.join('../output/eval/', f'episode_{episode}.gif'), fps=10)
+        if render:
+            print(f"Saving episode {episode} gif")
+            images_to_gif(imgs, os.path.join('../output/eval/', f'episode_{episode}.gif'), fps=10)
     if render:
         #padding the last action to make all actions same length
         trajs = pad_and_stack_trajectories(all_actions)
@@ -227,5 +235,8 @@ def evaluate(max_steps,
 
 if __name__ == "__main__":
     # evaluate the model
-    evaluate(max_steps=50, num_episodes=30, model_path='../output/diffusion_policy.pth',render = True)
+    embeddings = np.load("../output/save_data/embeddings.npy")
+    #try a mixture of both embeddings
+    cond = embeddings[0] * 1.5 - embeddings[1] * 0.5
+    evaluate(max_steps=50, num_episodes=10, model_path='../output/diffusion_policy.pth',render = True,cond = cond)
     print("Inference completed.")
