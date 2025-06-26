@@ -98,7 +98,9 @@ def visualize_trajectories(actions,
 
     # ---- save GIF -------------------------------------------------------------
     duration = 1.0 / fps
-    imageio.mimsave(str(gif_path), frames, format="GIF", duration=duration)
+    #loop forever
+    loop = 0
+    imageio.mimsave(str(gif_path), frames, format="GIF", duration=duration, loop=loop)
     print(f"Saved GIF ➜  {gif_path}")
 
     return frames

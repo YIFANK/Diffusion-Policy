@@ -1,4 +1,8 @@
 #@markdown ### **Inference**
+import sys
+import os
+# Add parent directory to path so we can import diffusion_policy
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import unittest
@@ -236,7 +240,8 @@ def evaluate(max_steps,
 if __name__ == "__main__":
     # evaluate the model
     embeddings = np.load("../output/save_data/embeddings.npy")
-    #try a mixture of both embeddings
-    cond = embeddings[0] * 1.5 - embeddings[1] * 0.5
+    #test the model with the learned concept weights
+    learned_weights = np.load("../output/save_data/learned_concept_weights.npy")
+    cond = embeddings[0] * learned_weights[0] + embeddings[1] * learned_weights[1]
     evaluate(max_steps=50, num_episodes=10, model_path='../output/diffusion_policy.pth',render = True,cond = cond)
     print("Inference completed.")

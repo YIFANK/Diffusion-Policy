@@ -1,4 +1,7 @@
 #ignore images, videos, and models
+#dataset
+*.pkl
+*.npy
 # Images
 *.png
 *.jpg
