@@ -1,4 +1,8 @@
 #training script for flow matching policy
+import sys
+import os
+# Add parent directory to path so we can import diffusion_policy
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -22,7 +26,7 @@ path1 = "../output/save_data/left.pkl"
 path2 = "../output/save_data/right.pkl"
 def train_flow_policy(epochs: int = 100,logging : bool = True):
     #load dataset
-    dataset = PushTImageDataset([path1,path2],np.load("../output/save_data/embeddings.npy"), 
+    dataset = PushTImageDataset([path1,path2],['left','right'], 
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -41,9 +45,9 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
                                        num_diffusion_iters=100)
     flow_policy.to(device)
     #load pretrained weights if available
-    if os.path.exists(model_path):
-        flow_policy.load_state_dict(torch.load(model_path))
-        print(f"Loaded pretrained weights from {model_path}")
+    # if os.path.exists(model_path):
+    #     flow_policy.load_state_dict(torch.load(model_path))
+    #     print(f"Loaded pretrained weights from {model_path}")
     # EMA model
     ema = EMAModel(parameters=flow_policy.parameters(), power=0.75)
 
@@ -61,8 +65,8 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
     )
     if logging:
         wandb.init(
-            project="Diffusion Policy",  # give your project a name
-            name="Policy with simple text conditioning",              # (optional) name of the specific run
+            project="Flow Matching Policy",  # give your project a name
+            name="Flow Matching Policy",              # (optional) name of the specific run
             config={
                 "epochs": epochs,
                 "learning_rate": 1e-4,
@@ -81,7 +85,7 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
                     nimage = nbatch['image'][:, :obs_horizon].to(device)
                     nagent_pos = nbatch['agent_pos'][:, :obs_horizon].to(device)
                     naction = nbatch['action'].to(device)
-                    ntext = nbatch['text'].to(device)
+                    ntext = nbatch['text']
                     # call forward() to compute loss
                     loss = flow_policy(nimage, nagent_pos, naction, ntext)
                     if logging:
@@ -103,29 +107,25 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
             tglobal.set_postfix(loss=np.mean(epoch_loss))
             if (epoch_idx+1) % 100 == 0:
                 # sample trajectories from the diffusion policy
-                nimages = nbatch['image'][0, :obs_horizon].to(device)
-                nagent_poses = nbatch['agent_pos'][0, :obs_horizon].to(device)
-                ntexts = nbatch['text'][0]  # no slicing needed for text
+                nimages = nbatch['image'][:1, :obs_horizon].to(device)
+                nagent_poses = nbatch['agent_pos'][:1, :obs_horizon].to(device)
+                ntexts = nbatch['text'][:1]  # no slicing needed for text
 
                 naction = flow_policy.sample(
                     nimages=nimages,
                     nagent_poses=nagent_poses,
                     ntexts = ntexts,
-                    num_diffusion_iters=100,
-                    n_samples = 10
                 )
 
                 uncond_naction = flow_policy.sample(
                     nimages=nimages,
                     nagent_poses=nagent_poses,
-                    num_diffusion_iters=100,
-                    n_samples = 10
                 )
                 # unnormalize action
                 naction = naction.detach().to('cpu').numpy()
                 uncond_naction = uncond_naction.detach().to('cpu').numpy()
-                visualize_trajectories(naction, n = 10,gif_path=f"../output/cond_trajectories.gif",)
-                visualize_trajectories(uncond_naction, n = 10,gif_path=f"../output/uncond_trajectories.gif",)
+                visualize_trajectories(naction, n = 1,gif_path=f"../output/cond_trajectories.gif",)
+                visualize_trajectories(uncond_naction, n = 1,gif_path=f"../output/uncond_trajectories.gif",)
     # copy EMA weights into model before saving
     ema.copy_to(flow_policy.parameters())
 
@@ -137,5 +137,5 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
         wandb.finish()  # finish the wandb run
 
 if __name__ == '__main__':
-    train_flow_policy(epochs=5000,logging = True)  # Adjust epochs as needed
+    train_flow_policy(epochs=1000,logging = True)  # Adjust epochs as needed
     print("Training complete.")

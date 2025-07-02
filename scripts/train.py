@@ -1,3 +1,7 @@
+import sys
+import os
+# Add parent directory to path so we can import diffusion_policy
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -11,7 +15,7 @@ import wandb
 from diffusion_policy.utils.visualization import visualize_trajectories
 
 dataset_path = '../output/save_data/test_workspace.pkl'
-model_path = '../output/diffusion_policy.pth'
+model_path = '../output/diffusion_policy_text.pth'
 
 obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
@@ -21,7 +25,7 @@ path1 = "../output/save_data/left.pkl"
 path2 = "../output/save_data/right.pkl"
 def train_diffusion_policy(epochs: int = 100,logging : bool = True):
     #load dataset
-    dataset = PushTImageDataset([path1,path2],np.load("../output/save_data/embeddings.npy"), 
+    dataset = PushTImageDataset([path1,path2],['left','right'], 
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -85,7 +89,7 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True):
                     nimage = nbatch['image'][:, :obs_horizon].to(device)
                     nagent_pos = nbatch['agent_pos'][:, :obs_horizon].to(device)
                     naction = nbatch['action'].to(device)
-                    ntext = nbatch['text'].to(device)
+                    ntext = nbatch['text']
                     # call forward() to compute loss
                     loss = diffusion_policy(nimage, nagent_pos, naction, ntext)
                     if logging:
@@ -105,11 +109,11 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True):
                     tepoch.set_postfix(loss=loss_cpu)
 
             tglobal.set_postfix(loss=np.mean(epoch_loss))
-            if (epoch_idx+1) % 100 == 0:
+            if (epoch_idx+1) % 50 == 0:
                 # sample trajectories from the diffusion policy
-                nimages = nbatch['image'][0, :obs_horizon].to(device)
-                nagent_poses = nbatch['agent_pos'][0, :obs_horizon].to(device)
-                ntexts = nbatch['text'][0]  # no slicing needed for text
+                nimages = nbatch['image'][:1, :obs_horizon].to(device)
+                nagent_poses = nbatch['agent_pos'][:1, :obs_horizon].to(device)
+                ntexts = nbatch['text'][:1]  # no slicing needed for text
 
                 naction = diffusion_policy.sample(
                     nimages=nimages,
@@ -141,5 +145,5 @@ def train_diffusion_policy(epochs: int = 100,logging : bool = True):
         wandb.finish()  # finish the wandb run
 
 if __name__ == '__main__':
-    train_diffusion_policy(epochs=5000,logging = True)  # Adjust epochs as needed
+    train_diffusion_policy(epochs=2000,logging = True)  # Adjust epochs as needed
     print("Training complete.")

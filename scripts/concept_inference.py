@@ -14,7 +14,8 @@ from tqdm import tqdm
 from diffusion_policy.utils.visualization import visualize_trajectories, pad_and_stack_trajectories
 from diffusion_policy.data.dataset import PushTImageDataset, normalize_data, unnormalize_data
 from diffusion_policy.models.diffusion_policy import DiffusionPolicy
-
+import matplotlib.pyplot as plt
+import umap
 obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
 action_dim = 2  # action dimension, e.g. 2 for push task
@@ -27,8 +28,6 @@ dataset = PushTImageDataset([path1,path2],[-1,1],
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
 stats = dataset.stats
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-embeddings = np.load("../output/save_data/embeddings.npy")
 
 def compute_concept_loss(diffusion_policy, nimage, nagent_pos, naction, concept_embeddings, concept_weights, 
                         c0_embedding, timesteps=None):
@@ -99,9 +98,12 @@ def compute_concept_loss(diffusion_policy, nimage, nagent_pos, naction, concept_
 def infer_new_concepts(
     model_path: str = '../output/diffusion_policy.pth',
     new_concept_dataset_path: str = '../output/save_data/new_concepts.pkl',
+    weights_output_path: str = '../output/save_data/learned_concept_weights.npy',
+    embeddings_output_path: str = '../output/save_data/learned_concept_embeddings.npy',
     num_epochs: int = 500,
-    learning_rate: float = 0.001,
-    batch_size: int = 32):
+    learning_rate: float = 0.0003,
+    batch_size: int = 64,
+    K: int = 1):
     """
     Infer new concept weights from demonstrations using frozen diffusion policy.
     
@@ -138,33 +140,45 @@ def infer_new_concepts(
     #load the new concept dataset
     new_dataset = PushTImageDataset([new_concept_dataset_path], [0], 
                                    pred_horizon=pred_horizon, obs_horizon=obs_horizon, action_horizon=action_horizon)
-    # Convert embeddings to torch tensors
-    concept_embeddings = torch.tensor(embeddings, dtype=torch.float32, device=device)
-    K = len(concept_embeddings)  # Number of concepts
+    # Load original semantic embeddings for comparison
+    original_embeddings = np.load("../output/save_data/embeddings.npy")
+    print(f"Loaded original semantic embeddings shape: {original_embeddings.shape}")
+    
+    # randomly initialize the concept embeddings
+    concept_embeddings = torch.randn(K, 64, device=device, requires_grad=True)
+    #concept_embeddings = torch.tensor(embeddings, dtype=torch.float32, device=device, requires_grad=True)
     
     # Initialize base concept c_0 as zero embedding or mean of concepts
     c0_embedding = torch.zeros(concept_embeddings.shape[1], device=device)
     # Alternative: c0_embedding = concept_embeddings.mean(dim=0)
     
-    print(f"Initializing {K} concept weights...")
-    # Randomly initialize the concept weights ω_k
-    concept_weights = torch.randn(K, device=device, requires_grad=True)
-    
-    # Set up optimizer to only optimize concept weights
-    optimizer = torch.optim.Adam([concept_weights], lr=learning_rate)
+    print(f"Initializing {K} concept weights and making {K} concept embeddings trainable...")
+    # set the concept weights as [1/K,1/K,...]
+    concept_weights = torch.ones(K, device=device) / K
+    concept_weights.requires_grad = True
+    # optimizer = torch.optim.Adam([concept_weights], lr=learning_rate)
+    # Set up optimizer to optimize both concept weights and embeddings
+    optimizer = torch.optim.Adam([concept_weights, concept_embeddings], lr=learning_rate)
     
     # Create data loader
     dataloader = torch.utils.data.DataLoader(
         new_dataset, 
         batch_size=batch_size, 
         shuffle=True,
-        num_workers=0  # Set to 0 to avoid multiprocessing issues
+        num_workers=8  
     )
     
     print("Starting concept weight optimization...")
     # Progress bar for epochs
     epoch_pbar = tqdm(range(num_epochs), desc="Training Progress", unit="epoch")
+    #use wandb to log the loss and weights
+    import wandb
+    wandb.init(project="concept-learning", name="concept-learning")
+    wandb.config.update({"num_epochs": num_epochs, "learning_rate": learning_rate, "batch_size": batch_size})
     
+    # Store trajectory of concept embeddings for UMAP visualization
+    embedding_trajectory = []
+    weight_trajectory = []
     for epoch in epoch_pbar:
         epoch_loss = 0.0
         num_batches = 0
@@ -190,7 +204,7 @@ def infer_new_concepts(
                 concept_weights=concept_weights,
                 c0_embedding=c0_embedding
             )
-            
+            wandb.log({"loss": loss.item(), "epoch": epoch})
             # Backward pass
             loss.backward()
             optimizer.step()
@@ -204,47 +218,154 @@ def infer_new_concepts(
         avg_loss = epoch_loss / num_batches if num_batches > 0 else 0
         
         # Update epoch progress bar with average loss and current weights
+        # Compute embedding norms to track how much concepts are changing
+        embedding_norms = torch.norm(concept_embeddings, dim=1).detach().cpu().numpy()
+        
+        wandb.log({
+            "avg_loss": avg_loss,
+            "weights": concept_weights.detach().cpu().numpy(),
+        })
+        
+        # Store current embeddings and weights for trajectory visualization
+        embedding_trajectory.append(concept_embeddings.detach().cpu().numpy().copy())
+        weight_trajectory.append(concept_weights.detach().cpu().numpy().copy())
+        
         concept_weights_str = ', '.join([f'{w:.3f}' for w in concept_weights.detach().cpu().numpy()])
+        embedding_norms_str = ', '.join([f'{n:.3f}' for n in embedding_norms])
+        
         epoch_pbar.set_postfix({
             'Avg Loss': f'{avg_loss:.6f}',
-            'Weights': f'[{concept_weights_str}]'
+            'Weights': f'[{concept_weights_str}]',
+            'Emb_Norms': f'[{embedding_norms_str}]'
         })
+        
+        if epoch % 100 == 0:
+            print(f"Epoch {epoch+1}: Weights=[{concept_weights_str}], Embedding_Norms=[{embedding_norms_str}]")
+            
+            # Create UMAP visualization of concept embedding trajectory
+            if len(embedding_trajectory) > 1:
+                # Combine original embeddings and learning trajectory for UMAP fitting
+                all_embeddings = []
+                
+                # Add original semantic embeddings (left/right concepts)
+                all_embeddings.extend(original_embeddings)
+                
+                # Add all embeddings from the learning trajectory 
+                for step_embs in embedding_trajectory:
+                    all_embeddings.extend(step_embs)
+                
+                all_embeddings = np.array(all_embeddings)
+                
+                # Fit UMAP on combined data
+                reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=5, min_dist=0.1)
+                embedding_2d = reducer.fit_transform(all_embeddings)
+                
+                # Split back into original and trajectory parts
+                n_original = len(original_embeddings)
+                n_concepts = len(concept_embeddings)
+                n_steps = len(embedding_trajectory)
+                
+                original_2d = embedding_2d[:n_original]
+                trajectory_2d = embedding_2d[n_original:].reshape(n_steps, n_concepts, 2)
+                
+                # Create visualization
+                plt.figure(figsize=(10, 8))
+                
+                # Plot original semantic concepts (left/right)
+                colors_orig = ['blue', 'green']
+                labels_orig = ['Left Concept', 'Right Concept'] 
+                for i, (pos, color, label) in enumerate(zip(original_2d, colors_orig, labels_orig)):
+                    plt.scatter(pos[0], pos[1], c=color, s=200, marker='*', 
+                              label=label, edgecolors='black', linewidth=2, alpha=0.8)
+                
+                # Plot trajectory for each learned concept
+                concept_colors = ['red', 'orange']
+                for c in range(n_concepts):
+                    traj_c = trajectory_2d[:, c, :]  # trajectory for concept c
+                    
+                    # Plot trajectory path
+                    plt.plot(traj_c[:, 0], traj_c[:, 1], 
+                            color=concept_colors[c], alpha=0.6, linewidth=2,
+                            label=f'Learned Concept {c+1} Trajectory')
+                    
+                    # Plot current position
+                    plt.scatter(traj_c[-1, 0], traj_c[-1, 1], 
+                              c=concept_colors[c], s=100, marker='o',
+                              edgecolors='black', linewidth=1)
+                    
+                    # Plot starting position  
+                    plt.scatter(traj_c[0, 0], traj_c[0, 1],
+                              c=concept_colors[c], s=80, marker='s', alpha=0.5,
+                              edgecolors='black', linewidth=1)
+                
+                plt.title(f"UMAP: Concept Embedding Evolution (Epoch {epoch+1})")
+                plt.xlabel("UMAP Dimension 1")
+                plt.ylabel("UMAP Dimension 2") 
+                plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                plt.grid(True, alpha=0.3)
+                plt.tight_layout()
+                
+                # Save to wandb
+                wandb.log({"concept_embedding_umap": wandb.Image(plt)})
+                plt.close()
+            
+            # Also create weight trajectory plot
+            if len(weight_trajectory) > 1:
+                weight_traj_arr = np.array(weight_trajectory)
+                plt.figure(figsize=(8, 6))
+                
+                if weight_traj_arr.shape[1] == 1:
+                    # Single concept case - plot weight vs epoch
+                    epochs = np.arange(len(weight_traj_arr))
+                    plt.plot(epochs, weight_traj_arr[:, 0], 
+                            marker='o', markersize=3, linewidth=1, alpha=0.7)
+                    plt.scatter(epochs[-1], weight_traj_arr[-1, 0], 
+                              c='red', s=50, label='Current Weight')
+                    plt.scatter(epochs[0], weight_traj_arr[0, 0],
+                              c='green', s=50, label='Initial Weight')
+                    plt.title(f"Weight Convergence Over Time (Epoch {epoch+1})")
+                    plt.xlabel("Training Step")
+                    plt.ylabel("Weight Value")
+                elif weight_traj_arr.shape[1] >= 2:
+                    # Multiple concepts case - plot in weight space
+                    plt.plot(weight_traj_arr[:, 0], weight_traj_arr[:, 1], 
+                            marker='o', markersize=3, linewidth=1, alpha=0.7)
+                    plt.scatter(weight_traj_arr[-1, 0], weight_traj_arr[-1, 1], 
+                              c='red', s=50, label='Current Weights')
+                    plt.scatter(weight_traj_arr[0, 0], weight_traj_arr[0, 1],
+                              c='green', s=50, label='Initial Weights')
+                    plt.title(f"Weight Space Convergence (Epoch {epoch+1})")
+                    plt.xlabel("Weight 1")
+                    plt.ylabel("Weight 2")
+                
+                plt.grid(True, alpha=0.3)
+                plt.legend()
+                wandb.log({"weight_trajectory": wandb.Image(plt)})
+                plt.close()
+            
+            # Save current state
+            np.save(weights_output_path, concept_weights.detach().cpu().numpy())
+            np.save(embeddings_output_path, concept_embeddings.detach().cpu().numpy())
     
     print("Concept weight optimization completed!")
     print(f"Final concept weights: {concept_weights.detach().cpu().numpy()}")
     
-    # Save the learned concept weights
-    output_path = '../output/save_data/learned_concept_weights.npy'
-    np.save(output_path, concept_weights.detach().cpu().numpy())
-    print(f"Learned concept weights saved to: {output_path}")
+    np.save(weights_output_path, concept_weights.detach().cpu().numpy())
+    np.save(embeddings_output_path, concept_embeddings.detach().cpu().numpy())
     
-    return concept_weights.detach().cpu().numpy()
+    print(f"Learned concept weights saved to: {weights_output_path}")
+    print(f"Learned concept embeddings saved to: {embeddings_output_path}")
+    
+    return {
+        'weights': concept_weights.detach().cpu().numpy(),
+        'embeddings': concept_embeddings.detach().cpu().numpy()
+    }
 
-print("Loading new concept dataset...")
-#load the new concept dataset
-new_dataset = PushTImageDataset(['../output/save_data/bump.pkl'], [0], 
-                                pred_horizon=pred_horizon, obs_horizon=obs_horizon, action_horizon=action_horizon)
-
-#extract actions from the dataset for visualization
-print(f"Dataset size: {len(new_dataset)}")
-actions_list = []
-for i in range(len(new_dataset)):
-    sample = new_dataset[i]
-    action = sample['action']  # shape: (pred_horizon, action_dim)
-    actions_list.append(action)
-
-# Stack actions into array with shape (N, pred_horizon, action_dim)
-actions_array = np.stack(actions_list, axis=0)
-print(f"Actions array shape: {actions_array.shape}")
-
-#visualize the new concept dataset
-visualize_trajectories(actions_array, n=20, gif_path='../output/save_data/new_concepts.gif')
 if __name__ == "__main__":
     # Run the concept inference
-    # learned_weights = infer_new_concepts(new_concept_dataset_path='../output/save_data/bump.pkl')
-    # print("Concept learning completed. Learned weights:", learned_weights)
-    # #save the learned weights
-    # np.save('../output/save_data/learned_concept_weights.npy', learned_weights)
-    # print("Learned weights saved to: ../output/save_data/learned_concept_weights.npy")
+    learned_weights = infer_new_concepts(new_concept_dataset_path = '../output/save_data/bump.pkl',
+    weights_output_path='../output/concepts/bump_weights.npy',
+    embeddings_output_path='../output/concepts/bump_embeddings.npy')
+    print("Concept learning completed. Learned weights:", learned_weights)
     pass
 
