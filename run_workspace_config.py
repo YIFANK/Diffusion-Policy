@@ -11,7 +11,7 @@ workspace_build_yaml = """
 workspace:
     type: 'push'
     'save_directory': 'output/save_data'
-    'save_name': 'right'
+    'save_name': 'red_circle_1'
 info:
     render_mode: 'human'
     video_fps: 10
@@ -23,22 +23,28 @@ info:
     seed: 666 # random seed
     window_text: 'Teleop PicknPlace Workspace + Symbolic Observer'
 scene_info:  
-    o1:
-        geometry: 
-            shape: 'box'
-            width: 100
-            height: 50
-        color: 'Brown'
-        position: [300, 300] # random position where there is no collision
-        angle: 0.2 # random position where there is no collision
-    # o2:
-    #     geometry:
-    #         shape: 'circle'
-    #         radius: 40
-    #     color: 'Gray'
-    #     position: [250, 250]
+    # o1:
+    #     geometry: 
+    #         shape: 'box'
+    #         width: 100
+    #         height: 50
+    #     color: 'Brown'
+    #     position: [300, 300] # random position where there is no collision
+    #     angle: 0.2 # random position where there is no collision
+    o2:
+        geometry:
+            shape: 'circle'
+            radius: 40
+        color: 'Red'
+        position: [150, 250]
+    o3:
+        geometry:
+            shape: 'circle'
+            radius: 40
+        color: 'Blue'
+        position: [350,250]
 agent_info: 
-    position: [100, 100]
+    position: [250, 50]
     observer:
         type: 'image'
         verbose: True
