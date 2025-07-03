@@ -82,7 +82,6 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
     with tqdm(range(epochs), desc='Epoch') as tglobal:
         for epoch_idx in tglobal:
             epoch_loss = []
-
             with tqdm(dataloader, desc='Batch', leave=False) as tepoch:
                 for nbatch in tepoch:
                     # move batch to device
