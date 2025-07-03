@@ -198,13 +198,14 @@ def sample_with_concept_composition(
     
     return naction
 
-def evaluate(max_steps,
+def evaluate(max_steps = 200,
             num_episodes = 10,
             model_path: str = '../output/diffusion_policy.pth',
             render: bool = False,
             concept_embeddings = None,
             concept_weights = None,
-            policy_type = "diffusion"):
+            policy_type = "diffusion",
+            task = ['blue', 1]):
     """Evaluate the policy (diffusion or flow matching) on the PushTImageEnv."""
     # load the policy
     if policy_type == "diffusion":
@@ -228,6 +229,7 @@ def evaluate(max_steps,
             text=True
         )
     policy.to(device)
+    embedding_type = "learned" if concept_embeddings is not None else "original"
     # Load the saved weights
     state_dict = torch.load(model_path, map_location=device)
     policy.load_state_dict(state_dict)
@@ -235,17 +237,19 @@ def evaluate(max_steps,
     embedding_weights = policy.encode_text(['push the blue block to the upper-right corner',
     'push the red block to the upper-left corner',
     'push the green block to the lower-left corner'])
-    similarity = torch.nn.functional.cosine_similarity(embedding_weights, torch.tensor(concept_embeddings, device=device)  , dim=-1)
-    print(f"Cosine similarity between embedding and learned weights: {similarity}")
     #test by replacing the concept weights with the embedding weights
-    concept_embeddings = embedding_weights[1:2]
-    concept_weights = torch.tensor([1.5], device=device)
+    if embedding_type == "original":
+        #test with one new concept
+        # concept_embeddings = embedding_weights[1:2]
+        concept_embeddings = policy.encode_text(['push the red block to the upper-left corner'])
+        concept_weights = torch.tensor([1.5], device=device)
     # environment setup
     tot_score = 0
     all_actions = []
-
+    print(f"Using {embedding_type} concept weights")
+    task_str = task[0] + str(task[1])
     for episode in range(1,num_episodes+1):
-        yaml_idx = 1
+        yaml_idx = task_names.index(task[0])
         cfg = OmegaConf.create(yamls[yaml_idx])
         env = ter_env.TEREnv(**cfg.info, scene_info=cfg.scene_info, agent_info=cfg.agent_info,
                              verbose = False)
@@ -260,7 +264,7 @@ def evaluate(max_steps,
             img = image_observer.observe()
             state = state_observer.observe()    
             #done if in one corner
-            if win_condition[yaml_idx](state):
+            if win_condition[task[1]](state):
                 reward = 1
                 done = True
             else:
@@ -329,16 +333,16 @@ def evaluate(max_steps,
                         nagent_poses=nagent_poses,
                         nsamples=10
                     )
-            if render and step_idx % 32 == 0:
-                print(f"Saving episode {episode} gif")
-                visualize_trajectories(
-                    naction,
-                    n=10,
-                    gif_path=os.path.join('../output/eval/', f'sample_trajectories.gif'),
-                    fps=10,
-                    seed=seed,
-                    background_img = images[-1]
-                )
+            # if render and step_idx % 32 == 0:
+            #     print(f"Saving episode {episode} gif")
+            #     visualize_trajectories(
+            #         naction,
+            #         n=10,
+            #         gif_path=os.path.join('../output/eval/', f'sample_trajectories.gif'),
+            #         fps=10,
+            #         seed=seed,
+            #         background_img = images[-1]
+            #     )
             # unnormalize action
             naction = naction.detach().to('cpu').numpy()
             # (B, pred_horizon, action_dim)
@@ -375,32 +379,35 @@ def evaluate(max_steps,
         print(f"Episode {episode} score: {sum(rewards)}")
         if render:
             print(f"Saving episode {episode} gif")
-            images_to_gif(imgs, os.path.join('../output/eval/', task_names[yaml_idx],policy_type, f'episode_{episode}.gif'), fps=10)
+            images_to_gif(imgs, os.path.join('../output/eval/', task_str,policy_type, embedding_type,f'episode_{episode}.gif'), fps=10)
     if render:
         #padding the last action to make all actions same length
         trajs = pad_and_stack_trajectories(all_actions)
         visualize_trajectories(
             trajs,
             n=num_episodes,
-            gif_path=os.path.join('../output/eval/', task_names[yaml_idx],policy_type, 'all_episodes.gif'),
+            gif_path=os.path.join('../output/eval/', task_str,policy_type, embedding_type, 'all_episodes.gif'),
             fps=10,
             seed=seed
         )
     print(f"Total score: {tot_score} over {num_episodes} episodes")
 
+def run_inference_flow():
+    learned_weights = np.load("../output/concepts/blue_1_weights_flow.npy")
+    embeddings = np.load("../output/concepts/blue_1_embeddings_flow.npy")
+    evaluate(model_path='../output/flow_policy_push.pth', 
+                render=True, concept_embeddings=embeddings, concept_weights=learned_weights, policy_type="flow_matching", task = ['blue', 0])
+    print("Inference completed.")
+def run_inference_diffusion():
+    learned_weights = np.load("../output/concepts/blue_1_weights_diffusion.npy")
+    embeddings = np.load("../output/concepts/blue_1_embeddings_diffusion.npy")
+    evaluate(model_path='../output/diffusion_policy_push.pth', 
+                render=True, concept_embeddings=embeddings, concept_weights=learned_weights, policy_type="diffusion", task = ['blue', 0])
+    print("Inference completed.")
 if __name__ == "__main__":
     # evaluate the model
-    # embeddings = np.load("../output/concepts/left_embeddings_diffusion.npy")
     # #test the model with the learned concept weights
-    embeddings = np.zeros((1,512))
-    learned_weights = np.array([1])
-    # learned_weights = np.load("../output/concepts/left_weights_diffusion.npy")
-    # print(f"Loaded embeddings shape: {embeddings.shape}")
-    # print(f"Loaded weights: {learned_weights}") 
-    # Pass embeddings and weights directly to evaluate function
-    # The concept composition happens inside the sampling function
-    # evaluate(max_steps=50, num_episodes=5, model_path='../output/flow_policy.pth', 
-    #             render=True, concept_embeddings=embeddings, concept_weights=learned_weights, policy_type="flow_matching")
-    evaluate(max_steps=200, num_episodes=20, model_path='../output/flow_policy_push.pth', 
-                render=True, concept_embeddings=embeddings, concept_weights=learned_weights, policy_type="flow_matching")
-    print("Inference completed.")
+    # embeddings = np.zeros((1,512))
+    # learned_weights = np.array([1])
+    # run_inference_diffusion()
+    run_inference_flow()

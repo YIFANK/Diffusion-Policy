@@ -193,10 +193,12 @@ def infer_new_concepts(
     weights_output_path: str = '../output/save_data/learned_concept_weights.npy',
     embeddings_output_path: str = '../output/save_data/learned_concept_embeddings.npy',
     num_epochs: int = 100,
-    learning_rate: float = 0.002,
+    learning_rate: float = 1e-4,
     batch_size: int = 512,
     K: int = 1,
-    logging: bool = True):
+    logging: bool = True,
+    init_type: str = "random",
+    text_condition: str = "none"):
     """
     Infer new concept weights from demonstrations using frozen policy (diffusion or flow matching).
     
@@ -255,17 +257,23 @@ def infer_new_concepts(
     'push the red block to the upper-left corner',
     'push the green block to the lower-left corner'])
     print(f"Loaded original semantic embeddings shape: {original_embeddings.shape}")
+    print(f"initializing {init_type} concept embeddings")
     # randomly initialize the concept embeddings
-    concept_embeddings = torch.randn(K, 512, device=device, requires_grad=True)
+    if init_type == "random":
+        concept_embeddings = torch.randn(K, 512, device=device, requires_grad=True)
+    elif init_type == "original":
+        concept_embeddings = policy.encode_text([text_condition])
+        #require grad is True
+        concept_embeddings.requires_grad = True
     #concept_embeddings = torch.tensor(embeddings, dtype=torch.float32, device=device, requires_grad=True)
     
     # Initialize base concept c_0 as zero embeddings
     c0_embedding = torch.zeros(concept_embeddings.shape[1], device=device)
     
     print(f"Initializing {K} concept weights and making {K} concept embeddings trainable...")
-    # set the concept weights as [1.5,1.5,1.5]
-    concept_weights = torch.ones(K, device=device) * 1.5
-    concept_weights.requires_grad = False
+    # set the concept weights as [1/K, 1/K, 1/K]
+    concept_weights = torch.ones(K, device=device) / K
+    concept_weights.requires_grad = True
     # optimizer = torch.optim.Adam([concept_weights], lr=learning_rate)
     # Set up optimizer to optimize both concept weights and embeddings
     optimizer = torch.optim.Adam([concept_weights, concept_embeddings], lr=learning_rate)
@@ -284,7 +292,7 @@ def infer_new_concepts(
     #use wandb to log the loss and weights
     if logging:
         import wandb
-        wandb.init(project="concept-learning", name=f"concept-learning-{policy_type}")
+        wandb.init(project="concept-learning", name=f"{policy_type}-{init_type}-{text_condition}")
         wandb.config.update({
         "num_epochs": num_epochs, 
         "learning_rate": learning_rate, 
@@ -358,9 +366,11 @@ def infer_new_concepts(
             'Emb_Norms': f'[{embedding_norms_str}]'
         })
         
-        if epoch % 20 == 0:
+        if epoch == num_epochs - 1:
             print(f"Epoch {epoch+1}: Weights=[{concept_weights_str}], Embedding_Norms=[{embedding_norms_str}]")
-            
+            # Save current state
+            np.save(weights_output_path, concept_weights.detach().cpu().numpy())
+            np.save(embeddings_output_path, concept_embeddings.detach().cpu().numpy())
             # Create UMAP visualization of concept embedding trajectory
             if len(embedding_trajectory) > 1:
                 # Combine original embeddings and learning trajectory for UMAP fitting
@@ -390,15 +400,15 @@ def infer_new_concepts(
                 # Create visualization
                 plt.figure(figsize=(10, 8))
                 
-                # Plot original semantic concepts (left/right)
-                colors_orig = ['blue', 'green']
-                labels_orig = ['Left Concept', 'Right Concept'] 
+                # Plot original semantic concepts (blue, red, green)
+                colors_orig = ['blue', 'red', 'green']
+                labels_orig = ['Blue Concept', 'Red Concept', 'Green Concept'] 
                 for i, (pos, color, label) in enumerate(zip(original_2d, colors_orig, labels_orig)):
                     plt.scatter(pos[0], pos[1], c=color, s=500, marker='*', 
                               label=label, edgecolors='black', linewidth=2, alpha=0.8)
                 
                 # Plot trajectory for each learned concept
-                concept_colors = ['red', 'orange']
+                concept_colors = ['blue', 'red', 'green', 'yellow']
                 for c in range(n_concepts):
                     traj_c = trajectory_2d[:, c, :]  # trajectory for concept c
                     
@@ -463,10 +473,6 @@ def infer_new_concepts(
                 if logging:
                     wandb.log({"weight_trajectory": wandb.Image(plt)})
                 plt.close()
-            
-            # Save current state
-            np.save(weights_output_path, concept_weights.detach().cpu().numpy())
-            np.save(embeddings_output_path, concept_embeddings.detach().cpu().numpy())
     
     print("Concept weight optimization completed!")
     print(f"Final concept weights: {concept_weights.detach().cpu().numpy()}")
@@ -476,33 +482,42 @@ def infer_new_concepts(
     
     print(f"Learned concept weights saved to: {weights_output_path}")
     print(f"Learned concept embeddings saved to: {embeddings_output_path}")
-    
+    wandb.finish()
     return {
         'weights': concept_weights.detach().cpu().numpy(),
         'embeddings': concept_embeddings.detach().cpu().numpy()
     }
-
-if __name__ == "__main__":
-    # Example usage for diffusion policy
+def run_diffusion():
     print("Running concept inference for diffusion policy...")
     learned_weights_diffusion = infer_new_concepts(
         model_path='../output/diffusion_policy_push.pth',
         policy_type="diffusion",
-        new_concept_dataset_path='../output/save_data/Blue_1.pkl',
-        weights_output_path='../output/concepts/blue_weights_diffusion.npy',
-        embeddings_output_path='../output/concepts/blue_embeddings_diffusion.npy'
+        new_concept_dataset_path='../output/save_data/Blue_2.pkl',
+        weights_output_path='../output/concepts/blue_2_weights_diffusion.npy',
+        embeddings_output_path='../output/concepts/blue_2_embeddings_diffusion.npy',
+        init_type = "random",
+        num_epochs = 500,
+        K = 2,
+        # text_condition = "push the red block to the upper-left corner"
     )
-    print("Diffusion policy concept learning completed. Learned weights:", learned_weights_diffusion)
-    
-    # Example usage for flow matching policy  
-    # print("\nRunning concept inference for flow matching policy...")
-    # learned_weights_flow = infer_new_concepts(
-    #     model_path='../output/flow_policy.pth',
-    #     policy_type="flow_matching",
-    #     new_concept_dataset_path='../output/save_data/left.pkl',
-    #     weights_output_path='../output/concepts/left_weights_flow.npy',
-    #     embeddings_output_path='../output/concepts/left_embeddings_flow.npy',
-    #     logging = True
-    # )
-    # print("Flow matching policy concept learning completed. Learned weights:", learned_weights_flow)
+    print("Diffusion policy concept learning completed.")
+def run_flow_matching():
+    print("Running concept inference for flow matching policy...")
+    learned_weights_diffusion = infer_new_concepts(
+        model_path='../output/flow_policy_push.pth',
+        policy_type="flow_matching",
+        new_concept_dataset_path='../output/save_data/Blue_2.pkl',
+        weights_output_path='../output/concepts/blue_2_weights_flow.npy',
+        embeddings_output_path='../output/concepts/blue_2_embeddings_flow.npy',
+        init_type = "random",
+        num_epochs = 500,
+        K = 2,
+        # text_condition = "push the red block to the upper-left corner"
+    )
+    print("Flow matching policy concept learning completed.")
+if __name__ == "__main__":
+    # Example usage for diffusion policy
+    # run_diffusion() 
+    run_flow_matching()
+    pass
 
