@@ -79,6 +79,7 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
                 # add any other hyperparams you want to log
             }
         )
+    #testing if git push works
     with tqdm(range(epochs), desc='Epoch') as tglobal:
         for epoch_idx in tglobal:
             epoch_loss = []
