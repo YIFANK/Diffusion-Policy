@@ -5,6 +5,7 @@ from .network import ConditionalUnet1D
 from .vision_encoder import get_resnet, replace_bn_with_gn
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from typing import Optional, Tuple, Dict
+from transformers import CLIPTokenizer, CLIPTextModel
 
 class SimpleTextEncoder(nn.Module):
     def __init__(self):
@@ -48,6 +49,7 @@ class DiffusionPolicy(nn.Module):
         text_feature_dim = 0
         self.vision, self.text = vision, text
         if vision:
+            print("Using vision encoder")
             self.vision_encoder = get_resnet('resnet18')
             self.vision_encoder = replace_bn_with_gn(self.vision_encoder)
             vision_feature_dim = 512  # resnet18 output
@@ -55,9 +57,10 @@ class DiffusionPolicy(nn.Module):
             # self.text_encoder = AutoModel.from_pretrained('bert-base-uncased')
             # for param in self.text_encoder.parameters():
             #     param.requires_grad = False  # freeze
-            text_feature_dim = 64
-            #encode left and right as 64-dim random gaussian variables
-            self.text_encoder = SimpleTextEncoder()
+            print("Using text encoder")
+            self.text_encoder = CLIPTextModel.from_pretrained('openai/clip-vit-base-patch32')
+            self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
+            text_feature_dim = 512
         obs_dim = vision_feature_dim + lowdim_obs_dim
         lowdim_obs_dim = 2
         action_dim = 2
@@ -79,6 +82,33 @@ class DiffusionPolicy(nn.Module):
             clip_sample=True,
             prediction_type='epsilon'
         )
+    
+    def encode_text(self, text_list):
+        tokens = self.tokenizer(text = text_list, padding=True, return_tensors="pt").to(next(self.parameters()).device)
+        with torch.no_grad():
+            return self.text_encoder(**tokens).last_hidden_state[:, 0, :] # (B, 512)
+
+    def get_cond(self, nimage, nagent_pos, ntext, uncond = False):
+        """
+        Get conditioning features for inference.
+        """
+        B = nimage.shape[0]
+        if self.vision:
+            image_features = self.vision_encoder(nimage.flatten(end_dim=1))
+            image_features = image_features.reshape(B, self.obs_horizon, -1)
+            obs_features = torch.cat([image_features, nagent_pos], dim=-1)
+            obs_cond = obs_features.flatten(start_dim=1)
+        else:
+            obs_features = nagent_pos
+            obs_cond = obs_features.flatten(start_dim=1)
+        if self.text:
+            #tokenize text
+            if uncond or ntext is None:
+                text_emb = torch.zeros(B, 512, device=nimage.device)
+            else:
+                text_emb = self.encode_text(ntext)
+            obs_cond = torch.cat([obs_cond, text_emb], dim=-1) 
+        return obs_cond
     # -------------- training -------------------------------------------------
     def forward(self, nimage, nagent_pos, naction, ntext = None, p_uncond = 0.1):
         """
@@ -89,29 +119,19 @@ class DiffusionPolicy(nn.Module):
         """
         B = nimage.shape[0]
 
-        # Vision encoding
-        if self.vision:
-            image_features = self.vision_encoder(nimage.flatten(end_dim=1))
-            image_features = image_features.reshape(B, self.obs_horizon, -1)
-
-            # Concatenate with low-dim observations
-            obs_features = torch.cat([image_features, nagent_pos], dim=-1)
-            obs_cond = obs_features.flatten(start_dim=1)  # (B, obs_horizon * obs_dim)
-        else:
-            obs_features = nagent_pos
-        obs_cond = obs_features.flatten(start_dim = 1)
-        #text conditioning
-        if self.text:
-            # encode text (assume frozen encoder)
-            text_emb = self.text_encoder(ntext)  # (B, text_emb_dim)
-
-            # classifier-free guidance: randomly drop text conditioning
-            mask = (torch.rand(B, device=naction.device) > p_uncond).float().unsqueeze(1)
-            # print(text_emb.shape,mask.shape)
-            text_emb = text_emb * mask  # zero out some text conditions
-
-            # concatenate text embedding into condition
-            obs_cond = torch.cat([obs_cond, text_emb], dim=-1)
+        # Get both conditional and unconditional features
+        cond = self.get_cond(nimage, nagent_pos, ntext, uncond=False)
+        uncond = self.get_cond(nimage, nagent_pos, ntext, uncond=True)
+        
+        # Create mask for which samples get unconditional treatment
+        uncond_mask = torch.rand(B, device=naction.device) < p_uncond
+        
+        # Combine conditional and unconditional based on mask
+        obs_cond = torch.where(
+            uncond_mask.unsqueeze(-1),
+            uncond,
+            cond
+        )
         # Sample noise
         noise = torch.randn_like(naction)
 
@@ -145,28 +165,14 @@ class DiffusionPolicy(nn.Module):
               guidance_scale: float = 1.5) -> torch.Tensor:
         """Sample actions from the diffusion policy."""
         device = next(self.parameters()).device
-
-        # ---- Vision encoding ----
-        if self.vision:
-            image_features = self.vision_encoder(nimages)  # (obs_horizon, 512)
-            obs_features = torch.cat([image_features, nagent_poses], dim=-1)  # (obs_horizon, obs_dim)
-        else:
-            obs_features = nagent_poses
-
-        obs_cond_base = obs_features.flatten(start_dim=0).unsqueeze(0).repeat(n_samples, 1).to(device)
-
-        # ---- Text encoding ----
-        if self.text:
-            if ntexts is None:
-                ntexts = torch.zeros(64)
-            text_emb = self.text_encoder(ntexts)  # assume (B, text_dim) or (1, text_dim)
-            text_emb = text_emb.repeat(n_samples, 1).to(device)
-            text_emb_zero = torch.zeros_like(text_emb)
-            obs_cond_cond = torch.cat([obs_cond_base, text_emb], dim=-1)
-            obs_cond_uncond = torch.cat([obs_cond_base, text_emb_zero], dim=-1)
-        else:
-            obs_cond_cond = obs_cond_base
-            obs_cond_uncond = obs_cond_base
+        
+        # Get conditional and unconditional features using get_cond
+        obs_cond_cond = self.get_cond(nimages, nagent_poses, ntexts, uncond=False)
+        obs_cond_uncond = self.get_cond(nimages, nagent_poses, ntexts, uncond=True)
+        
+        # Repeat for n_samples
+        obs_cond_cond = obs_cond_cond.repeat(n_samples, 1).to(device)
+        obs_cond_uncond = obs_cond_uncond.repeat(n_samples, 1).to(device)
 
         # ---- Initialize Gaussian noise ----
         naction = torch.randn((n_samples, self.pred_horizon, self.action_dim), device=device)

@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import imageio.v2 as imageio
 from matplotlib import rcParams
 from PIL import Image
-
+from diffusion_policy.utils.img_to_gif import np_to_img
 
 def pad_and_stack_trajectories(trajectories):
     """
@@ -46,6 +46,7 @@ def visualize_trajectories(actions,
                             gif_path: str | Path = "training_trajs.gif",
                             fps: int = 5,
                             seed: int | None = None,
+                            background_img: str | Path | None = None,
                             dpi: int = 120):
     """
     Create an animated GIF that shows `n` sampled training trajectories unfolding over time.
@@ -79,6 +80,16 @@ def visualize_trajectories(actions,
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
         ax.set_aspect("equal", adjustable="box")
+        if background_img is not None:
+            #check if background_img is a tensor
+            if isinstance(background_img, torch.Tensor):
+                background = background_img.permute(1,2,0).cpu().numpy()
+                background = np_to_img(background)
+            elif isinstance(background_img, np.ndarray):
+                background = np_to_img(background_img)
+            else:
+                background = Image.open(background_img)
+            ax.imshow(background, extent=[*xlim, *ylim], zorder=0)
         # ax.axis('off')  # remove axis ticks for consistent layout
 
         for k in range(n):
@@ -93,7 +104,6 @@ def visualize_trajectories(actions,
                        edgecolors="k",
                        s=70,
                        zorder=3)
-
         frames.append(_fig_to_pil(fig))
 
     # ---- save GIF -------------------------------------------------------------

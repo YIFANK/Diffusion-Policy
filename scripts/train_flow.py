@@ -16,21 +16,24 @@ import wandb
 from diffusion_policy.utils.visualization import visualize_trajectories
 
 dataset_path = '../output/save_data/test_workspace.pkl'
-model_path = '../output/flow_policy.pth'
+model_path = '../output/flow_policy_push.pth'
 
 obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
 action_dim = 2  # action dimension, e.g. 2 for push task
 action_horizon = 8  # number of actions to output, e.g. 8 for push task
-path1 = "../output/save_data/left.pkl"
-path2 = "../output/save_data/right.pkl"
+path1 = "../output/save_data/Blue_1.pkl"
+path2 = "../output/save_data/Red_2.pkl"
+path3 = "../output/save_data/Green_3.pkl"
 def train_flow_policy(epochs: int = 100,logging : bool = True):
     #load dataset
-    dataset = PushTImageDataset([path1,path2],['left','right'], 
+    dataset = PushTImageDataset([path1,path2,path3],['push the blue block to the upper-right corner',
+    'push the red block to the upper-left corner',
+    'push the green block to the lower-left corner'], 
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=64,
+        batch_size=256,
         num_workers=4,
         shuffle=True,
         # accelerate cpu-gpu transfer
@@ -42,12 +45,13 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
     flow_policy = FlowMatchingPolicy(obs_horizon=obs_horizon, pred_horizon=pred_horizon,
                                        lowdim_obs_dim=2,
                                        action_dim=action_dim,
-                                       num_diffusion_iters=100)
+                                       num_diffusion_iters=100,
+                                       vision = True)
     flow_policy.to(device)
     #load pretrained weights if available
-    # if os.path.exists(model_path):
-    #     flow_policy.load_state_dict(torch.load(model_path))
-    #     print(f"Loaded pretrained weights from {model_path}")
+    if os.path.exists(model_path):
+        flow_policy.load_state_dict(torch.load(model_path))
+        print(f"Loaded pretrained weights from {model_path}")
     # EMA model
     ema = EMAModel(parameters=flow_policy.parameters(), power=0.75)
 
@@ -115,17 +119,19 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
                     nimages=nimages,
                     nagent_poses=nagent_poses,
                     ntexts = ntexts,
+                    nsamples=10
                 )
 
                 uncond_naction = flow_policy.sample(
                     nimages=nimages,
                     nagent_poses=nagent_poses,
+                    nsamples=10
                 )
                 # unnormalize action
                 naction = naction.detach().to('cpu').numpy()
                 uncond_naction = uncond_naction.detach().to('cpu').numpy()
-                visualize_trajectories(naction, n = 1,gif_path=f"../output/cond_trajectories.gif",)
-                visualize_trajectories(uncond_naction, n = 1,gif_path=f"../output/uncond_trajectories.gif",)
+                visualize_trajectories(naction, n = 10,gif_path=f"../output/cond_trajectories.gif",background_img=nimages[0])
+                visualize_trajectories(uncond_naction, n = 10,gif_path=f"../output/uncond_trajectories.gif",background_img=nimages[0])
     # copy EMA weights into model before saving
     ema.copy_to(flow_policy.parameters())
 

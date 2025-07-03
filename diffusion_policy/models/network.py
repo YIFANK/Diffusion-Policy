@@ -15,6 +15,26 @@ import torch
 import torch.nn as nn
 import math
 from typing import Union
+class LearnableTimeEmbedding(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(1, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim * 4),
+            nn.SiLU(),
+            nn.Linear(dim * 4, dim)
+        )
+
+    def forward(self, t):
+        """
+        t: (B,) or (B, 1)
+        Output: (B, dim)
+        """
+        if t.ndim == 1:
+            t = t.unsqueeze(-1)
+        return self.mlp(t)
+
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -122,7 +142,8 @@ class ConditionalUnet1D(nn.Module):
         diffusion_step_embed_dim=256,
         down_dims=[256,512,1024],
         kernel_size=5,
-        n_groups=8
+        n_groups=8,
+        type = 'sinusoidal'
         ):
         """
         input_dim: Dim of actions.
@@ -140,12 +161,15 @@ class ConditionalUnet1D(nn.Module):
         start_dim = down_dims[0]
 
         dsed = diffusion_step_embed_dim
-        diffusion_step_encoder = nn.Sequential(
-            SinusoidalPosEmb(dsed),
-            nn.Linear(dsed, dsed * 4),
-            nn.Mish(),
-            nn.Linear(dsed * 4, dsed),
-        )
+        if type == 'sinusoidal':
+            diffusion_step_encoder = nn.Sequential(
+                SinusoidalPosEmb(dsed),
+                nn.Linear(dsed, dsed * 4),
+                nn.Mish(),
+                nn.Linear(dsed * 4, dsed),
+            )
+        else:
+            diffusion_step_encoder = LearnableTimeEmbedding(dsed)
         cond_dim = dsed + global_cond_dim
 
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
@@ -219,7 +243,7 @@ class ConditionalUnet1D(nn.Module):
         timesteps = timestep
         if not torch.is_tensor(timesteps):
             # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
-            timesteps = torch.tensor([timesteps], dtype=torch.long, device=sample.device)
+            timesteps = torch.tensor([timesteps], dtype=torch.float32, device=sample.device)
         elif torch.is_tensor(timesteps) and len(timesteps.shape) == 0:
             timesteps = timesteps[None].to(sample.device)
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML

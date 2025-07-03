@@ -34,7 +34,8 @@ Diffusion-Policy/
 │       └── config.yaml        # Default configuration
 ├── scripts/                   # Executable scripts
 │   ├── train.py              # Training script
-│   └── inference.py          # Inference and evaluation
+│   ├── inference.py          # Inference and evaluation
+│   └── concept_inference.py  # Concept-based inference
 ├── examples/                  # Example notebooks and demos
 │   └── diffusion_policy_vision_pusht_demo.ipynb
 ├── tests/                     # Test suite

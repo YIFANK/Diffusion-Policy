@@ -76,3 +76,4 @@ def images_to_gif(
         loop=loop,
         duration=duration,
     )
+    print(f"Saved gif to {save_path}")
