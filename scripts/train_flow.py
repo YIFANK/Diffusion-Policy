@@ -22,14 +22,11 @@ obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
 action_dim = 2  # action dimension, e.g. 2 for push task
 action_horizon = 8  # number of actions to output, e.g. 8 for push task
-path1 = "../output/save_data/Blue_1.pkl"
-path2 = "../output/save_data/Red_2.pkl"
-path3 = "../output/save_data/Green_3.pkl"
+path_list = [f'../dataset/{color}_{num}.pkl' for color in ['Blue', 'Red', 'Green'] for num in [0,1,2,3]]
+description_list = [f'push the {color} block to the {num} corner' for color in ['blue', 'red', 'green'] for num in ['lower-right', 'upper-right', 'upper-left', 'lower-left']]
 def train_flow_policy(epochs: int = 100,logging : bool = True):
     #load dataset
-    dataset = PushTImageDataset([path1,path2,path3],['push the blue block to the upper-right corner',
-    'push the red block to the upper-left corner',
-    'push the green block to the lower-left corner'], 
+    dataset = PushTImageDataset(path_list,description_list, 
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -143,5 +140,5 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
         wandb.finish()  # finish the wandb run
 
 if __name__ == '__main__':
-    train_flow_policy(epochs=1000,logging = True)  # Adjust epochs as needed
+    train_flow_policy(epochs=500,logging = True)  # Adjust epochs as needed
     print("Training complete.")

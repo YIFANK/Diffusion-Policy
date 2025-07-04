@@ -9,7 +9,9 @@ def preprocess(dataset_path: str):
     all_actions = []
     episode_ends = []
     frame_idx = 0
+    #only use 20 scenes
     for scene in scenes:
+        scene.trajectories = scene.trajectories[:20]
         for traj in scene.trajectories:
             states = traj.data
             for state in states:
