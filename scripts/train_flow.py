@@ -16,14 +16,15 @@ import wandb
 from diffusion_policy.utils.visualization import visualize_trajectories
 
 dataset_path = '../output/save_data/test_workspace.pkl'
-model_path = '../output/flow_policy_push.pth'
+model_path = '../output/blue_flow_policy_BERT.pth'
 
 obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
 action_dim = 2  # action dimension, e.g. 2 for push task
 action_horizon = 8  # number of actions to output, e.g. 8 for push task
-path_list = [f'../dataset/{color}_{num}.pkl' for color in ['Blue', 'Red', 'Green'] for num in [0,1,2,3]]
-description_list = [f'push the {color} block to the {num} corner' for color in ['blue', 'red', 'green'] for num in ['lower-right', 'upper-right', 'upper-left', 'lower-left']]
+Colors = ['Blue', 'Red', 'Green']
+path_list = [f'../dataset/{color}_{num}.pkl' for color in Colors[:1] for num in [0,1,2,3]]
+description_list = [f'push the {color} block to the {num} corner' for color in Colors[:1] for num in ['lower-right', 'upper-right', 'upper-left', 'lower-left']]
 def train_flow_policy(epochs: int = 100,logging : bool = True):
     #load dataset
     dataset = PushTImageDataset(path_list,description_list, 
@@ -31,7 +32,7 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=256,
-        num_workers=4,
+        num_workers=8,
         shuffle=True,
         # accelerate cpu-gpu transfer
         pin_memory=True,
@@ -43,7 +44,8 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
                                        lowdim_obs_dim=2,
                                        action_dim=action_dim,
                                        num_diffusion_iters=100,
-                                       vision = True)
+                                       vision = True,
+                                       cached_labels_path = '../output/VLM2Vec_cached_labels.pkl')
     flow_policy.to(device)
     #load pretrained weights if available
     if os.path.exists(model_path):
@@ -77,58 +79,67 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
             }
         )
     #testing if git push works
-    with tqdm(range(epochs), desc='Epoch') as tglobal:
-        for epoch_idx in tglobal:
-            epoch_loss = []
-            with tqdm(dataloader, desc='Batch', leave=False) as tepoch:
-                for nbatch in tepoch:
-                    # move batch to device
-                    nimage = nbatch['image'][:, :obs_horizon].to(device)
-                    nagent_pos = nbatch['agent_pos'][:, :obs_horizon].to(device)
-                    naction = nbatch['action'].to(device)
-                    ntext = nbatch['text']
-                    # call forward() to compute loss
-                    loss = flow_policy(nimage, nagent_pos, naction, ntext)
-                    if logging:
-                        wandb.log({"loss": loss.item()})
-                    # optimize
-                    loss.backward()
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    lr_scheduler.step()
+    try:
+        with tqdm(range(epochs), desc='Epoch') as tglobal:
+            for epoch_idx in tglobal:
+                epoch_loss = []
+                with tqdm(dataloader, desc='Batch', leave=False) as tepoch:
+                    for nbatch in tepoch:
+                        # move batch to device
+                        nimage = nbatch['image'][:, :obs_horizon].to(device)
+                        nagent_pos = nbatch['agent_pos'][:, :obs_horizon].to(device)
+                        naction = nbatch['action'].to(device)
+                        ntext = nbatch['text']
+                        # call forward() to compute loss
+                        loss = flow_policy(nimage, nagent_pos, naction, ntext)
+                        if logging:
+                            wandb.log({"loss": loss.item()})
+                        # optimize
+                        loss.backward()
+                        optimizer.step()
+                        optimizer.zero_grad()
+                        lr_scheduler.step()
 
-                    # update EMA
-                    ema.step(flow_policy.parameters())
+                        # update EMA
+                        ema.step(flow_policy.parameters())
 
-                    # logging
-                    loss_cpu = loss.item()
-                    epoch_loss.append(loss_cpu)
-                    tepoch.set_postfix(loss=loss_cpu)
+                        # logging
+                        loss_cpu = loss.item()
+                        epoch_loss.append(loss_cpu)
+                        tepoch.set_postfix(loss=loss_cpu)
 
-            tglobal.set_postfix(loss=np.mean(epoch_loss))
-            if (epoch_idx+1) % 100 == 0:
-                # sample trajectories from the diffusion policy
-                nimages = nbatch['image'][:1, :obs_horizon].to(device)
-                nagent_poses = nbatch['agent_pos'][:1, :obs_horizon].to(device)
-                ntexts = nbatch['text'][:1]  # no slicing needed for text
+                tglobal.set_postfix(loss=np.mean(epoch_loss))
+                if (epoch_idx+1) % 100 == 0:
+                    # sample trajectories from the diffusion policy
+                    nimages = nbatch['image'][:1, :obs_horizon].to(device)
+                    nagent_poses = nbatch['agent_pos'][:1, :obs_horizon].to(device)
+                    ntexts = nbatch['text'][:1]  # no slicing needed for text
 
-                naction = flow_policy.sample(
-                    nimages=nimages,
-                    nagent_poses=nagent_poses,
-                    ntexts = ntexts,
-                    nsamples=10
-                )
+                    naction = flow_policy.sample(
+                        nimages=nimages,
+                        nagent_poses=nagent_poses,
+                        ntexts = ntexts,
+                        nsamples=10
+                    )
 
-                uncond_naction = flow_policy.sample(
-                    nimages=nimages,
-                    nagent_poses=nagent_poses,
-                    nsamples=10
-                )
-                # unnormalize action
-                naction = naction.detach().to('cpu').numpy()
-                uncond_naction = uncond_naction.detach().to('cpu').numpy()
-                visualize_trajectories(naction, n = 10,gif_path=f"../output/cond_trajectories.gif",background_img=nimages[0])
-                visualize_trajectories(uncond_naction, n = 10,gif_path=f"../output/uncond_trajectories.gif",background_img=nimages[0])
+                    uncond_naction = flow_policy.sample(
+                        nimages=nimages,
+                        nagent_poses=nagent_poses,
+                        nsamples=10
+                    )
+                    # unnormalize action
+                    naction = naction.detach().to('cpu').numpy()
+                    uncond_naction = uncond_naction.detach().to('cpu').numpy()
+                    visualize_trajectories(naction, n = 10,gif_path=f"../output/cond_trajectories.gif",background_img=nimages[0][0])
+                    visualize_trajectories(uncond_naction, n = 10,gif_path=f"../output/uncond_trajectories.gif",background_img=nimages[0][0])
+    except KeyboardInterrupt:
+        print("Keyboard interrupt, saving model and exiting.")
+        # copy EMA weights into model before saving
+        ema.copy_to(flow_policy.parameters())
+        # save model
+        torch.save(flow_policy.state_dict(), model_path)
+        print(f"Model saved to {model_path}")
+        del flow_policy, ema, optimizer, lr_scheduler  # free memory
     # copy EMA weights into model before saving
     ema.copy_to(flow_policy.parameters())
 
@@ -140,5 +151,5 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
         wandb.finish()  # finish the wandb run
 
 if __name__ == '__main__':
-    train_flow_policy(epochs=500,logging = True)  # Adjust epochs as needed
+    train_flow_policy(epochs=300,logging = True)  # Adjust epochs as needed
     print("Training complete.")

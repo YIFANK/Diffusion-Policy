@@ -5,23 +5,8 @@ from .network import ConditionalUnet1D
 from .vision_encoder import get_resnet, replace_bn_with_gn
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from typing import Optional, Tuple, Dict
-from transformers import CLIPTokenizer, CLIPTextModel
-
-class SimpleTextEncoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, texts):
-        """
-        texts: list of strings, length B
-        returns: tensor of shape (B, 64)
-        """
-        if torch.is_tensor(texts):
-            # If already a tensor, ensure it's float32
-            return texts.float()
-        else:
-            # Convert to tensor and ensure float32
-            return torch.tensor(texts, dtype=torch.float32)
+from transformers import BertTokenizer, VisualBertModel
+import pickle
     
 class DiffusionPolicy(nn.Module):
     """
@@ -41,7 +26,7 @@ class DiffusionPolicy(nn.Module):
     """
     def __init__(self, obs_horizon = 2, pred_horizon = 16,
                 lowdim_obs_dim = 2, action_dim = 2,num_diffusion_iters=100,
-                vision = False,text = True):
+                vision = False,text = True, cached_labels_path = '../output/cached_labels.pkl'):
         super().__init__()
 
         # vision encoder
@@ -58,9 +43,10 @@ class DiffusionPolicy(nn.Module):
             # for param in self.text_encoder.parameters():
             #     param.requires_grad = False  # freeze
             print("Using text encoder")
-            self.text_encoder = CLIPTextModel.from_pretrained('openai/clip-vit-base-patch32')
-            self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-            text_feature_dim = 512
+            #use linear projection as text encoder
+            self.text_encoder = nn.Linear(3584, 64)
+            text_feature_dim = 64
+            self.text_feature_dim = 64
         obs_dim = vision_feature_dim + lowdim_obs_dim
         lowdim_obs_dim = 2
         action_dim = 2
@@ -68,7 +54,8 @@ class DiffusionPolicy(nn.Module):
         self.obs_horizon, self.pred_horizon = obs_horizon, pred_horizon
         self.obs_dim = obs_dim
         self.action_dim = action_dim
-
+        self.cached_labels_path = cached_labels_path
+        self.cached_labels = self.load_cached_labels()  
         # noise prediction network
         self.noise_pred_net = ConditionalUnet1D(
             input_dim=action_dim,
@@ -84,9 +71,23 @@ class DiffusionPolicy(nn.Module):
         )
     
     def encode_text(self, text_list):
-        tokens = self.tokenizer(text = text_list, padding=True, return_tensors="pt").to(next(self.parameters()).device)
-        with torch.no_grad():
-            return self.text_encoder(**tokens).last_hidden_state[:, 0, :] # (B, 512)
+        # Load cached labels if not already loaded
+        if not hasattr(self, '_cached_labels'):
+            with open(self.cached_labels_path, 'rb') as f:
+                self._cached_labels = pickle.load(f)
+        # Get embeddings for each text
+        try:
+            text_emb = [self._cached_labels[text] for text in text_list]
+        except KeyError as e:
+            raise KeyError(f"Text '{e.args[0]}' not found in cached labels")
+        text_emb = torch.cat(text_emb, dim=0)
+        #change to Float
+        text_emb = text_emb.float()
+        # Project through linear layer
+        text_emb = self.text_encoder(text_emb)
+        
+        return text_emb
+        
 
     def get_cond(self, nimage, nagent_pos, ntext, uncond = False):
         """
@@ -104,7 +105,7 @@ class DiffusionPolicy(nn.Module):
         if self.text:
             #tokenize text
             if uncond or ntext is None:
-                text_emb = torch.zeros(B, 512, device=nimage.device)
+                text_emb = torch.zeros(B, self.text_feature_dim, device=nimage.device)
             else:
                 text_emb = self.encode_text(ntext)
             obs_cond = torch.cat([obs_cond, text_emb], dim=-1) 
@@ -122,6 +123,8 @@ class DiffusionPolicy(nn.Module):
         # Get both conditional and unconditional features
         cond = self.get_cond(nimage, nagent_pos, ntext, uncond=False)
         uncond = self.get_cond(nimage, nagent_pos, ntext, uncond=True)
+        # Ensure cond and uncond have same shape
+        assert cond.shape[1] == uncond.shape[1], f"Conditional and unconditional shapes don't match: {cond.shape} vs {uncond.shape}"
         
         # Create mask for which samples get unconditional treatment
         uncond_mask = torch.rand(B, device=naction.device) < p_uncond
@@ -210,6 +213,27 @@ class DiffusionPolicy(nn.Module):
             ).prev_sample
 
         return naction  # (n_samples, pred_horizon, action_dim)
+
+    def load_cached_labels(self):
+        """Load cached labels from file."""
+        try:
+            with open(self.cached_labels_path, 'rb') as f:
+                return pickle.load(f)
+        except FileNotFoundError:
+            print(f"Warning: {self.cached_labels_path} not found. Creating new cache.")
+            return {}
+    
+    def save_cached_labels(self, labels):
+        """Save cached labels to file."""
+        with open(self.cached_labels_path, 'wb') as f:
+            pickle.dump(labels, f)
+
+    def clear_cached_labels(self):
+        """Clear cached labels."""
+        self.cached_labels = {}
+        self.save_cached_labels(self.cached_labels)
+    
+
 
 
 

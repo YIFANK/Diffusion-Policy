@@ -18,7 +18,7 @@ import random
 import collections
 from diffusion_policy.utils.visualization import visualize_trajectories, pad_and_stack_trajectories
 from diffusion_policy.data.dataset import PushTImageDataset, normalize_data, unnormalize_data
-
+import pickle
 obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
 action_dim = 2  # action dimension, e.g. 2 for push task
@@ -71,18 +71,16 @@ yellow_yaml = green_yaml.replace('Green', 'Yellow')
 yamls = [blue_yaml, red_yaml, green_yaml, yellow_yaml]
 task_names = ['blue', 'red', 'green', 'yellow']
 win_condition = [
+    lambda x: x['o1']['position'][0] > 416 and x['o1']['position'][1] < 96, #lower-right
     lambda x: x['o1']['position'][0] > 416 and x['o1']['position'][1] > 416, #upper-right
     lambda x: x['o1']['position'][0] < 96 and x['o1']['position'][1] > 416, #upper-left
     lambda x: x['o1']['position'][0] < 96 and x['o1']['position'][1] < 96, #lower-left
-    lambda x: x['o1']['position'][0] > 416 and x['o1']['position'][1] < 96, #lower-right
 ]
+corner_names = ['lower-right', 'upper-right', 'upper-left', 'lower-left']
 dataset_path = '../output/save_data/test_workspace.pkl'
-path1 = "../output/save_data/Blue_1.pkl"
-path2 = "../output/save_data/Red_2.pkl"
-path3 = "../output/save_data/Green_3.pkl"
-dataset = PushTImageDataset([path1,path2,path3],['push the blue block to the upper-right corner',
-    'push the red block to the upper-left corner',
-    'push the green block to the lower-left corner'], 
+path_list = [f'../dataset/{color}_{num}.pkl' for color in ['Blue', 'Red', 'Green'] for num in [0,1,2,3]]
+description_list = [f'push the {color} block to the {corner} corner' for color in ['blue', 'red', 'green'] for corner in corner_names]
+dataset = PushTImageDataset(path_list,description_list, 
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
 stats = dataset.stats
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -201,11 +199,12 @@ def sample_with_concept_composition(
 def evaluate(max_steps = 200,
             num_episodes = 10,
             model_path: str = '../output/diffusion_policy.pth',
-            render: bool = False,
+            render: bool = True,
             concept_embeddings = None,
             concept_weights = None,
             policy_type = "diffusion",
-            task = ['blue', 1]):
+            task = ['blue', 1],
+            init_type = 'random'):
     """Evaluate the policy (diffusion or flow matching) on the PushTImageEnv."""
     # load the policy
     if policy_type == "diffusion":
@@ -216,38 +215,44 @@ def evaluate(max_steps = 200,
             action_dim=action_dim,
             num_diffusion_iters=100,
             vision=True,
-            text=True
+            text=True,
+            cached_labels_path = '../output/cached_labels.pkl'
         )
     elif policy_type == "flow_matching":
-        policy = FlowMatchingPolicy(
-            obs_horizon=obs_horizon,
-            pred_horizon=pred_horizon,
-            lowdim_obs_dim=2,
-            action_dim=action_dim,
-            num_diffusion_iters=100,
-            vision=True,
-            text=True
-        )
+        policy = FlowMatchingPolicy(obs_horizon=obs_horizon, pred_horizon=pred_horizon,
+                lowdim_obs_dim=2,
+                action_dim=action_dim,
+                num_diffusion_iters=100,
+                vision = True,
+                cached_labels_path = '../output/VLM2Vec_cached_labels.pkl')
     policy.to(device)
     embedding_type = "learned" if concept_embeddings is not None else "original"
+    #save episode scores to a file
+    task_str = task[0] + str(task[1])
+    #create the directory if it doesn't exist
+    os.makedirs(os.path.join('../output/eval/', task_str,policy_type, init_type), exist_ok=True)
+    f = open(os.path.join('../output/eval/', task_str,policy_type, init_type, 'episode_scores.txt'), 'w')
+    f.write(f"Task: {task[0]} {corner_names[task[1]]}\n")
+    f.write(f"Policy type: {policy_type}\n")
+    f.write(f"Learning initial type: {init_type}\n")
+    f.write(f"Concept weights: {concept_weights}\n")
+    f.write(f"Episode scores: \n")
     # Load the saved weights
     state_dict = torch.load(model_path, map_location=device)
     policy.load_state_dict(state_dict)
-    #compare embedding weights with learned weights
-    embedding_weights = policy.encode_text(['push the blue block to the upper-right corner',
-    'push the red block to the upper-left corner',
-    'push the green block to the lower-left corner'])
     #test by replacing the concept weights with the embedding weights
+    #check cached labels
     if embedding_type == "original":
         #test with one new concept
         # concept_embeddings = embedding_weights[1:2]
-        concept_embeddings = policy.encode_text(['push the red block to the upper-left corner'])
+        description = f'push the {task[0]} block to the {corner_names[task[1]]} corner'
+        print(description)
+        concept_embeddings = policy.encode_text([description])
         concept_weights = torch.tensor([1.5], device=device)
     # environment setup
     tot_score = 0
     all_actions = []
     print(f"Using {embedding_type} concept weights")
-    task_str = task[0] + str(task[1])
     for episode in range(1,num_episodes+1):
         yaml_idx = task_names.index(task[0])
         cfg = OmegaConf.create(yamls[yaml_idx])
@@ -266,6 +271,7 @@ def evaluate(max_steps = 200,
             #done if in one corner
             if win_condition[task[1]](state):
                 reward = 1
+                print(f"Succeed!")
                 done = True
             else:
                 reward = 0
@@ -325,13 +331,13 @@ def evaluate(max_steps = 200,
                         nimages=nimages,
                         nagent_poses=nagent_poses,
                         num_diffusion_iters=100,
-                        n_samples=10
+                        n_samples=1
                     )
                 elif policy_type == "flow_matching":
                     naction = policy.sample(
                         nimages=nimages,
                         nagent_poses=nagent_poses,
-                        nsamples=10
+                        nsamples=1
                     )
             # if render and step_idx % 32 == 0:
             #     print(f"Saving episode {episode} gif")
@@ -377,31 +383,36 @@ def evaluate(max_steps = 200,
         all_actions.append(actions)
         # save the images as a gif
         print(f"Episode {episode} score: {sum(rewards)}")
+        f.write(f"{sum(rewards)}\n")
         if render:
             print(f"Saving episode {episode} gif")
-            images_to_gif(imgs, os.path.join('../output/eval/', task_str,policy_type, embedding_type,f'episode_{episode}.gif'), fps=10)
+            images_to_gif(imgs, os.path.join('../output/eval/', task_str,policy_type, init_type,f'episode_{episode}.gif'), fps=10)
     if render:
         #padding the last action to make all actions same length
         trajs = pad_and_stack_trajectories(all_actions)
         visualize_trajectories(
             trajs,
             n=num_episodes,
-            gif_path=os.path.join('../output/eval/', task_str,policy_type, embedding_type, 'all_episodes.gif'),
+            gif_path=os.path.join('../output/eval/', task_str,policy_type, init_type, 'all_episodes.gif'),
             fps=10,
             seed=seed
         )
     print(f"Total score: {tot_score} over {num_episodes} episodes")
+    f.write(f"Total score: {tot_score} over {num_episodes} episodes\n")
+    f.close()
 
 def run_inference_flow():
-    learned_weights = np.load("../output/concepts/blue_1_weights_flow.npy")
-    embeddings = np.load("../output/concepts/blue_1_embeddings_flow.npy")
-    evaluate(model_path='../output/flow_policy_push.pth', 
-                render=True, concept_embeddings=embeddings, concept_weights=learned_weights, policy_type="flow_matching", task = ['blue', 0])
+    learned_weights = None
+    embeddings = None
+    evaluate(model_path='../output/blue_flow_policy_BERT.pth', 
+                render=True, concept_embeddings=embeddings, concept_weights=learned_weights, policy_type="flow_matching", task = ['blue', 1])
     print("Inference completed.")
 def run_inference_diffusion():
-    learned_weights = np.load("../output/concepts/blue_1_weights_diffusion.npy")
-    embeddings = np.load("../output/concepts/blue_1_embeddings_diffusion.npy")
-    evaluate(model_path='../output/diffusion_policy_push.pth', 
+    # learned_weights = np.load("../output/concepts/blue_1_weights_diffusion.npy")
+    # embeddings = np.load("../output/concepts/blue_1_embeddings_diffusion.npy")
+    learned_weights = None
+    embeddings = None
+    evaluate(model_path='../output/blue_diffusion_policy_VLM2Vec.pth', 
                 render=True, concept_embeddings=embeddings, concept_weights=learned_weights, policy_type="diffusion", task = ['blue', 0])
     print("Inference completed.")
 if __name__ == "__main__":
@@ -409,5 +420,6 @@ if __name__ == "__main__":
     # #test the model with the learned concept weights
     # embeddings = np.zeros((1,512))
     # learned_weights = np.array([1])
-    # run_inference_diffusion()
-    run_inference_flow()
+    run_inference_diffusion()
+    # run_inference_flow()
+    pass

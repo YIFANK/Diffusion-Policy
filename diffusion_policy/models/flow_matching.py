@@ -4,12 +4,12 @@ from torchvision.models import resnet18
 from .network import ConditionalUnet1D
 from .vision_encoder import get_resnet, replace_bn_with_gn
 from typing import Optional, Tuple, Dict
-from transformers import CLIPTokenizer, CLIPTextModel
-
+from transformers import BertTokenizer, VisualBertModel
+import pickle
 class FlowMatchingPolicy(nn.Module):
     def __init__(self, obs_horizon = 2, pred_horizon = 16,
                 lowdim_obs_dim = 2, action_dim = 2, num_diffusion_iters=100,
-                vision = False, text = True):
+                vision = False, text = True, cached_labels_path = '../output/cached_labels.pkl'):
         super().__init__()
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
@@ -19,6 +19,8 @@ class FlowMatchingPolicy(nn.Module):
         text_feature_dim = 0
         self.vision, self.text = vision, text
         self.num_diffusion_iters = num_diffusion_iters
+        self.cached_labels_path = cached_labels_path
+        self.cached_labels = self.load_cached_labels()  
         if vision:
             print("Using vision encoder")
             self.vision_encoder = get_resnet('resnet18')
@@ -27,12 +29,11 @@ class FlowMatchingPolicy(nn.Module):
             
         if text:
             print("Using text encoder")
-            # self.text_encoder = AutoModel.from_pretrained('bert-base-uncased')
+            # self.tokenizer = BertTokenizer.from_pretrained("google-bert/bert-base-uncased")
+            # self.text_encoder = VisualBertModel.from_pretrained("uclanlp/visualbert-vqa-coco-pre")
             # for param in self.text_encoder.parameters():
             #     param.requires_grad = False  # freeze
-            self.text_encoder = CLIPTextModel.from_pretrained('openai/clip-vit-base-patch32')
-            self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-            text_feature_dim = 512
+            text_feature_dim = 768
         obs_dim = vision_feature_dim + lowdim_obs_dim
         
         # Flow matching predictor (predicts vector field)
@@ -96,10 +97,19 @@ class FlowMatchingPolicy(nn.Module):
         loss = F.mse_loss(pred_vector_field, true_vector_field)
         
         return loss
+
     def encode_text(self, text_list):
-        tokens = self.tokenizer(text = text_list, padding=True, return_tensors="pt").to(next(self.parameters()).device)
-        with torch.no_grad():
-            return self.text_encoder(**tokens).last_hidden_state[:, 0, :] # (B, 512)
+        text_emb = []
+        for text in text_list:
+            if text in self.cached_labels:
+                text_emb.append(self.cached_labels[text])
+            else:
+                tokens = self.tokenizer(text = text, padding=True, return_tensors="pt").to(next(self.parameters()).device)
+                with torch.no_grad():
+                    emb = self.text_encoder(**tokens).last_hidden_state[:, 0, :] # (B, 768)
+                    text_emb.append(emb)
+                    self.cached_labels[text] = emb
+        return torch.cat(text_emb, dim=0)
 
 
     def get_cond(self, nimage, nagent_pos, ntext, uncond = False):
@@ -118,7 +128,7 @@ class FlowMatchingPolicy(nn.Module):
         if self.text:
             #tokenize text
             if uncond or ntext is None:
-                text_emb = torch.zeros(B, 512, device=nimage.device)
+                text_emb = torch.zeros(B, 768, device=nimage.device)
             else:
                 text_emb = self.encode_text(ntext)
             obs_cond = torch.cat([obs_cond, text_emb], dim=-1) 
@@ -167,5 +177,25 @@ class FlowMatchingPolicy(nn.Module):
             x = x + dt * v_t
             
         return x
+
+    
+    def load_cached_labels(self):
+        """Load cached labels from file."""
+        try:
+            with open(self.cached_labels_path, 'rb') as f:
+                return pickle.load(f)
+        except FileNotFoundError:
+            print(f"Warning: {self.cached_labels_path} not found. Creating new cache.")
+            return {}
+    
+    def save_cached_labels(self, labels):
+        """Save cached labels to file."""
+        with open(self.cached_labels_path, 'wb') as f:
+            pickle.dump(labels, f)
+
+    def clear_cached_labels(self):
+        """Clear cached labels."""
+        self.cached_labels = {}
+        self.save_cached_labels(self.cached_labels)
 
 

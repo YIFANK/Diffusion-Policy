@@ -17,18 +17,16 @@ from diffusion_policy.models.diffusion_policy import DiffusionPolicy
 from diffusion_policy.models.flow_matching import FlowMatchingPolicy
 import matplotlib.pyplot as plt
 import umap
+corner_names = ['lower-right', 'upper-right', 'upper-left', 'lower-left']
 obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
 action_dim = 2  # action dimension, e.g. 2 for push task
 action_horizon = 8  # number of actions to output, e.g. 8 for push task
 
 dataset_path = '../output/save_data/test_workspace.pkl'
-path1 = "../output/save_data/Blue_1.pkl"
-path2 = "../output/save_data/Red_2.pkl"
-path3 = "../output/save_data/Green_3.pkl"
-dataset = PushTImageDataset([path1,path2,path3],['push the blue block to the upper-right corner',
-    'push the red block to the upper-left corner',
-    'push the green block to the lower-left corner'], 
+path_list = [f'../dataset/{color}_{num}.pkl' for color in ['Blue', 'Red', 'Green'] for num in [0,1,2,3]]
+description_list = [f'push the {color} block to the {corner} corner' for color in ['blue', 'red', 'green'] for corner in corner_names]
+dataset = PushTImageDataset(path_list,description_list, 
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
 stats = dataset.stats
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -195,10 +193,10 @@ def infer_new_concepts(
     num_epochs: int = 100,
     learning_rate: float = 1e-4,
     batch_size: int = 512,
-    K: int = 1,
+    K: int = 2,
     logging: bool = True,
     init_type: str = "random",
-    text_condition: str = "none"):
+    task: list = ['blue', 1]):
     """
     Infer new concept weights from demonstrations using frozen policy (diffusion or flow matching).
     
@@ -261,10 +259,14 @@ def infer_new_concepts(
     # randomly initialize the concept embeddings
     if init_type == "random":
         concept_embeddings = torch.randn(K, 512, device=device, requires_grad=True)
-    elif init_type == "original":
-        concept_embeddings = policy.encode_text([text_condition])
+    else:
+        concept_embeddings = policy.encode_text([f'push the {task[0]} block to the {corner_names[task[1]]} corner'])
         #require grad is True
         concept_embeddings.requires_grad = True
+        if init_type == 'fixed':
+            #fixed the concept embeddings
+            concept_embeddings.requires_grad = False
+        K = 1
     #concept_embeddings = torch.tensor(embeddings, dtype=torch.float32, device=device, requires_grad=True)
     
     # Initialize base concept c_0 as zero embeddings
@@ -292,7 +294,7 @@ def infer_new_concepts(
     #use wandb to log the loss and weights
     if logging:
         import wandb
-        wandb.init(project="concept-learning", name=f"{policy_type}-{init_type}-{text_condition}")
+        wandb.init(project="concept-learning", name=f"{policy_type}-{init_type}-{task[0]}-{task[1]}")
         wandb.config.update({
         "num_epochs": num_epochs, 
         "learning_rate": learning_rate, 

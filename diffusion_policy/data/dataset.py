@@ -11,8 +11,8 @@ def preprocess(dataset_path: str):
     frame_idx = 0
     #only use 20 scenes
     for scene in scenes:
-        scene.trajectories = scene.trajectories[:20]
-        for traj in scene.trajectories:
+        # print(len(scene.trajectories))
+        for traj in scene.trajectories[:40]:
             states = traj.data
             for state in states:
                 obs_img = state.observation  # this should be shape (96, 96, 3)
