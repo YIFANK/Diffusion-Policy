@@ -29,7 +29,7 @@ def np_to_img(arr: np.ndarray) -> Image.Image:
         raise ValueError(f"Unsupported array shape: {arr.shape}")
 
 def images_to_gif(
-    frames: Sequence[Union[str, Image.Image]],
+    frames: Sequence[Union[str, Image.Image, np.ndarray]],
     save_path: str,
     fps: int = 10,  # Frames per second
     loop: int = 0          # 0 = loop forever, 1 = play once, etc.
@@ -48,6 +48,8 @@ def images_to_gif(
     loop : int, default 0
         How many times to repeat the GIF (0 = infinite).
     """
+    if isinstance(frames, np.ndarray):
+        frames = [np_to_img(frame) for frame in frames]
     if not frames:
         raise ValueError("frames cannot be empty")
 

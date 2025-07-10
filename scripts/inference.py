@@ -59,6 +59,14 @@ green_yaml = """
             color: 'Green'
             # position: [250, 250] # random position where there is no collision
             angle: 0
+        # o2: 
+        #     geometry:
+        #         shape: 'box'
+        #         width: 100
+        #         height: 100
+        #     color: 'Yellow'
+        #     # position: [100,100]
+        #     angle: 0
     agent_info: 
         # position: [50, 50]
         observer:
@@ -99,7 +107,7 @@ def sample_with_concept_composition(
     c0_embedding,
     num_diffusion_iters=100,
     n_samples=1,
-    policy_type="diffusion"
+    policy_type="diffusion",
 ):
     """
     Sample actions using concept composition during the sampling process.
@@ -204,7 +212,8 @@ def evaluate(max_steps = 200,
             concept_weights = None,
             policy_type = "diffusion",
             task = ['blue', 1],
-            init_type = 'random'):
+            init_type = 'original',
+            noise_pred_net_type = 'unet'):
     """Evaluate the policy (diffusion or flow matching) on the PushTImageEnv."""
     # load the policy
     if policy_type == "diffusion":
@@ -216,7 +225,8 @@ def evaluate(max_steps = 200,
             num_diffusion_iters=100,
             vision=True,
             text=True,
-            cached_labels_path = '../output/cached_labels.pkl'
+            cached_labels_path = '../output/cached_labels.pkl',
+            noise_pred_net_type = noise_pred_net_type
         )
     elif policy_type == "flow_matching":
         policy = FlowMatchingPolicy(obs_horizon=obs_horizon, pred_horizon=pred_horizon,
@@ -224,7 +234,7 @@ def evaluate(max_steps = 200,
                 action_dim=action_dim,
                 num_diffusion_iters=100,
                 vision = True,
-                cached_labels_path = '../output/VLM2Vec_cached_labels.pkl')
+                cached_labels_path = '../output/cached_labels.pkl')
     policy.to(device)
     embedding_type = "learned" if concept_embeddings is not None else "original"
     #save episode scores to a file
@@ -322,8 +332,8 @@ def evaluate(max_steps = 200,
                     c0_embedding=c0_embedding,
                     num_diffusion_iters=100,
                     n_samples=10,
-                    policy_type=policy_type
-                )
+                    policy_type=policy_type,
+                )   
             else:
                 # Fall back to original sampling
                 if policy_type == "diffusion":
@@ -339,16 +349,16 @@ def evaluate(max_steps = 200,
                         nagent_poses=nagent_poses,
                         nsamples=1
                     )
-            # if render and step_idx % 32 == 0:
-            #     print(f"Saving episode {episode} gif")
-            #     visualize_trajectories(
-            #         naction,
-            #         n=10,
-            #         gif_path=os.path.join('../output/eval/', f'sample_trajectories.gif'),
-            #         fps=10,
-            #         seed=seed,
-            #         background_img = images[-1]
-            #     )
+            if render and step_idx % 32 == 0:
+                print(f"Saving episode {episode} gif")
+                visualize_trajectories(
+                    naction,
+                    n=10,
+                    gif_path=os.path.join('../output/eval/', f'sample_trajectories.gif'),
+                    fps=10,
+                    seed=seed,
+                    background_img = images[-1]
+                )
             # unnormalize action
             naction = naction.detach().to('cpu').numpy()
             # (B, pred_horizon, action_dim)

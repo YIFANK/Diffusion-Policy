@@ -1,7 +1,7 @@
 # policy.py (replace old DiffusionPolicy definition)
 import math, torch, torch.nn as nn, torch.nn.functional as F
 from torchvision.models import resnet18
-from .network import ConditionalUnet1D
+from .network import ConditionalUnet1D, ConditionalTransformer1D
 from .vision_encoder import get_resnet, replace_bn_with_gn
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from typing import Optional, Tuple, Dict
@@ -23,10 +23,13 @@ class DiffusionPolicy(nn.Module):
         num_diffusion_iters: Number of diffusion denoising steps
         vision: Whether to use vision encoder
         text: Whether to use text conditioning
+        cached_labels_path: Path to cached text labels
+        noise_pred_net_type: Type of noise prediction network ('unet' or 'transformer')
     """
     def __init__(self, obs_horizon = 2, pred_horizon = 16,
                 lowdim_obs_dim = 2, action_dim = 2,num_diffusion_iters=100,
-                vision = False,text = True, cached_labels_path = '../output/cached_labels.pkl'):
+                vision = False,text = True, cached_labels_path = '../output/cached_labels.pkl',
+                noise_pred_net_type = 'unet'):
         super().__init__()
 
         # vision encoder
@@ -37,14 +40,20 @@ class DiffusionPolicy(nn.Module):
             print("Using vision encoder")
             self.vision_encoder = get_resnet('resnet18')
             self.vision_encoder = replace_bn_with_gn(self.vision_encoder)
-            vision_feature_dim = 512  # resnet18 output
+            vision_feature_dim = 512 # resnet18 output
         if text:
             # self.text_encoder = AutoModel.from_pretrained('bert-base-uncased')
             # for param in self.text_encoder.parameters():
             #     param.requires_grad = False  # freeze
             print("Using text encoder")
             #use linear projection as text encoder
-            self.text_encoder = nn.Linear(3584, 64)
+            self.text_encoder = nn.Sequential(
+                nn.Linear(3584, 1024),
+                nn.ReLU(),
+                nn.Linear(1024, 512),
+                nn.ReLU(),
+                nn.Linear(512, 64)
+            )
             text_feature_dim = 64
             self.text_feature_dim = 64
         obs_dim = vision_feature_dim + lowdim_obs_dim
@@ -57,10 +66,25 @@ class DiffusionPolicy(nn.Module):
         self.cached_labels_path = cached_labels_path
         self.cached_labels = self.load_cached_labels()  
         # noise prediction network
-        self.noise_pred_net = ConditionalUnet1D(
-            input_dim=action_dim,
-            global_cond_dim=obs_dim * obs_horizon + text_feature_dim
-        )
+        if noise_pred_net_type == 'unet':
+            print("Using UNet-based noise prediction network")
+            self.noise_pred_net = ConditionalUnet1D(
+                input_dim=action_dim,
+                global_cond_dim=obs_dim * obs_horizon + text_feature_dim
+            )
+        elif noise_pred_net_type == 'transformer':
+            print("Using Transformer-based noise prediction network")
+            self.noise_pred_net = ConditionalTransformer1D(
+                input_dim=action_dim,
+                global_cond_dim=obs_dim * obs_horizon + text_feature_dim,
+                n_layers=6,  # Slightly smaller for efficiency
+                n_heads=8,
+                d_model=256,
+                d_ff=1024,
+                max_seq_len=pred_horizon
+            )
+        else:
+            raise ValueError(f"Unknown noise_pred_net_type: {noise_pred_net_type}. Choose 'unet' or 'transformer'.")
 
         # diffusion noise scheduler
         self.noise_scheduler = DDPMScheduler(
@@ -71,17 +95,22 @@ class DiffusionPolicy(nn.Module):
         )
     
     def encode_text(self, text_list):
-        # Load cached labels if not already loaded
-        if not hasattr(self, '_cached_labels'):
-            with open(self.cached_labels_path, 'rb') as f:
-                self._cached_labels = pickle.load(f)
-        # Get embeddings for each text
-        try:
-            text_emb = [self._cached_labels[text] for text in text_list]
-        except KeyError as e:
-            raise KeyError(f"Text '{e.args[0]}' not found in cached labels")
-        text_emb = torch.cat(text_emb, dim=0)
-        #change to Float
+        # If text_list contains tensors, use them directly
+        if isinstance(text_list[0], torch.Tensor):
+            text_emb = text_list
+        else:
+            # Load cached labels if not already loaded
+            if not hasattr(self, '_cached_labels'):
+                with open(self.cached_labels_path, 'rb') as f:
+                    self._cached_labels = pickle.load(f)
+            # Get embeddings for each text
+            try:
+                text_emb = [self._cached_labels[text] for text in text_list]
+            except KeyError as e:
+                raise KeyError(f"Text '{e.args[0]}' not found in cached labels")
+            text_emb = torch.cat(text_emb, dim=0)
+            
+        # Ensure float type
         text_emb = text_emb.float()
         # Project through linear layer
         text_emb = self.text_encoder(text_emb)
@@ -107,7 +136,10 @@ class DiffusionPolicy(nn.Module):
             if uncond or ntext is None:
                 text_emb = torch.zeros(B, self.text_feature_dim, device=nimage.device)
             else:
-                text_emb = self.encode_text(ntext)
+                if isinstance(ntext, list):
+                    text_emb = self.encode_text(ntext)
+                else:
+                    text_emb = ntext
             obs_cond = torch.cat([obs_cond, text_emb], dim=-1) 
         return obs_cond
     # -------------- training -------------------------------------------------

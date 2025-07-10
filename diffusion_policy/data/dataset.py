@@ -1,7 +1,9 @@
 import numpy as np
 import torch
 from tiny_embodied_reasoning.workspace import utils as utils
-def preprocess(dataset_path: str):
+def preprocess(dataset_path):
+    if dataset_path is None:
+        return None
     scenes = utils.load_trajectories_pickle(dataset_path)
     # Initialize storage
     all_images = []
@@ -9,10 +11,9 @@ def preprocess(dataset_path: str):
     all_actions = []
     episode_ends = []
     frame_idx = 0
-    #only use 20 scenes
     for scene in scenes:
         # print(len(scene.trajectories))
-        for traj in scene.trajectories[:40]:
+        for traj in scene.trajectories:
             states = traj.data
             for state in states:
                 obs_img = state.observation  # this should be shape (96, 96, 3)
@@ -48,6 +49,31 @@ def preprocess(dataset_path: str):
         }
     }
     return dataset_root
+
+def rotate_2d_vector(vector):
+    """rotate 2d vector on a 512 * 512 grid by 90 degrees"""
+    x, y = vector
+    x_new = 512 - y
+    y_new = x
+    return np.array([x_new, y_new])
+
+def rotate_dataset(dataset_root, times):
+    if dataset_root is None:
+        return None
+    """Rotate the dataset by 90 degrees `times` times, return new float32 dataset."""
+
+    new_data = {
+        'img': np.copy(dataset_root['data']['img']).astype(np.float32),
+        'state': np.copy(dataset_root['data']['state']).astype(np.float32),
+        'action': np.copy(dataset_root['data']['action']).astype(np.float32)
+    }
+
+    for _ in range(times % 4):
+        new_data['img'] = np.rot90(new_data['img'], axes=(1, 2)).copy()
+        new_data['state'] = np.array([rotate_2d_vector(s) for s in new_data['state']], dtype=np.float32)
+        new_data['action'] = np.array([rotate_2d_vector(a) for a in new_data['action']], dtype=np.float32)
+
+    return {'data': new_data, 'meta': dataset_root['meta']}
 
 
 def create_sample_indices(
@@ -126,7 +152,8 @@ class PushTImageDataset(torch.utils.data.Dataset):
                  text_conditions: list,
                  pred_horizon: int,
                  obs_horizon: int,
-                 action_horizon: int):
+                 action_horizon: int,
+                 rotate: bool = False):
         
         assert len(dataset_paths) == len(text_conditions), "Each dataset must have a corresponding text condition."
 
@@ -137,28 +164,54 @@ class PushTImageDataset(torch.utils.data.Dataset):
         all_text_conditions = []
 
         total_offset = 0  # to track episode ends across datasets
+        dataset_list = [preprocess(dataset_path) for dataset_path in dataset_paths]
+        for i, text_cond in enumerate(text_conditions):
+            if rotate:
+                for j in range(4):
+                    if dataset_list[j] is None:
+                        continue
+                    print(f'processing dataset {j}, length: {len(dataset_list[j]["data"]["img"])}')
+                    dataset_root = rotate_dataset(dataset_list[j],i - j + 4)
+                    # images
+                    image_data = dataset_root['data']['img'][:]  # (N,96,96,3)
+                    image_data = np.moveaxis(image_data, -1, 1)  # (N,3,96,96)
+                    all_image_data.append(image_data)
 
-        for dataset_path, text_cond in zip(dataset_paths, text_conditions):
-            dataset_root = preprocess(dataset_path)
+                    # agent pos and action
+                    state_data = dataset_root['data']['state'][:,:2]
+                    action_data = dataset_root['data']['action'][:]
+                    all_agent_pos.append(state_data)
+                    all_action.append(action_data)
 
-            # images
-            image_data = dataset_root['data']['img'][:]  # (N,96,96,3)
-            image_data = np.moveaxis(image_data, -1, 1)  # (N,3,96,96)
-            all_image_data.append(image_data)
+                    # episode ends
+                    episode_ends = dataset_root['meta']['episode_ends'][:] + total_offset
+                    all_episode_ends.append(episode_ends)
+                    total_offset += state_data.shape[0]
 
-            # agent pos and action
-            state_data = dataset_root['data']['state'][:,:2]
-            action_data = dataset_root['data']['action'][:]
-            all_agent_pos.append(state_data)
-            all_action.append(action_data)
+                    # text conditions (repeat text_cond for each frame)
+                    all_text_conditions.append([text_cond] * state_data.shape[0])
+            else:
+                if dataset_list[i] is None:
+                    continue
+                dataset_root = dataset_list[i]
+                # images
+                image_data = dataset_root['data']['img'][:]  # (N,96,96,3)
+                image_data = np.moveaxis(image_data, -1, 1)  # (N,3,96,96)
+                all_image_data.append(image_data)
 
-            # episode ends
-            episode_ends = dataset_root['meta']['episode_ends'][:] + total_offset
-            all_episode_ends.append(episode_ends)
-            total_offset += state_data.shape[0]
+                # agent pos and action
+                state_data = dataset_root['data']['state'][:,:2]
+                action_data = dataset_root['data']['action'][:]
+                all_agent_pos.append(state_data)
+                all_action.append(action_data)
 
-            # text conditions (repeat text_cond for each frame)
-            all_text_conditions.append([text_cond] * state_data.shape[0])
+                # episode ends
+                episode_ends = dataset_root['meta']['episode_ends'][:] + total_offset
+                all_episode_ends.append(episode_ends)
+                total_offset += state_data.shape[0]
+
+                # text conditions (repeat text_cond for each frame)
+                all_text_conditions.append([text_cond] * state_data.shape[0])
 
         # concatenate everything
         all_image_data = np.concatenate(all_image_data, axis=0)
@@ -218,22 +271,40 @@ class PushTImageDataset(torch.utils.data.Dataset):
         nsample['text'] = nsample['text'][0]  # text is constant for entire sequence
 
         return nsample
-    
+import random
+import sys
+sys.path.append('../../')
 from diffusion_policy.utils.visualization import visualize_trajectories
+from diffusion_policy.utils.img_to_gif import images_to_gif
+from PIL import Image
+
 if __name__ == "__main__":
-    path1 = "../output/save_data/left.pkl"
-    path2 = "../output/save_data/right.pkl"
-    dataset = PushTImageDataset([path1,path2],[-1,1], 
-                            pred_horizon=16, obs_horizon=2,action_horizon=8)
+    Colors = ['Blue', 'Red', 'Green']
+    colors = ['blue', 'red', 'green']
+    #only use Blue for now
+    path_list = [f'../../dataset/{color}_{num}.pkl' for color in Colors[:1] for num in [0,1,2,3]]
+    path_list[2] = None
+    path_list[3] = None
+    description_list = [f'push the {color} block to the {num} corner' for color in colors[:1] for num in ['lower-right', 'upper-right', 'upper-left', 'lower-left']]
+    dataset = PushTImageDataset(path_list,description_list, 
+                                pred_horizon=40, obs_horizon=30,action_horizon=8,rotate = True)
     #visualize trajectories
 
-    actions = [dataset['action'] for i in range(len(dataset))]
-    actions = np.stack(actions, axis=0)  # (N, pred_horizon, action_dim)
-    print(actions.shape)
-    visualize_trajectories(
-        actions,
-        n=50,
-        gif_path="../output/eval/trajectories.gif",
-        fps=10,
-        seed=42
-    )
+    # actions = [dataset[i]['action'] for i in range(len(dataset)) if dataset[i]['text'] == 'push the blue block to the upper-right corner']
+    # actions = np.stack(actions, axis=0)  # (N, pred_horizon, action_dim)
+    # print(actions.shape)
+    all_images = [dataset[i]['image'] for i in range(len(dataset)) if dataset[i]['text'] == 'push the blue block to the upper-left corner']
+    #select 3 random image list
+    images_list = [all_images[random.randint(0,len(all_images)-1)] for _ in range(3)]
+    #images.shape: (10, 3, 96, 96)
+    images_list = [image.transpose(0,2,3,1) for image in images_list]
+    images_to_gif(images_list[0],save_path = '../../output/eval/images.gif',fps = 10)
+    images_to_gif(images_list[1],save_path = '../../output/eval/images1.gif',fps = 10)
+    images_to_gif(images_list[2],save_path = '../../output/eval/images2.gif',fps = 10)
+    # visualize_trajectories(
+    #     actions,
+    #     n=50,
+    #     gif_path="../../output/eval/trajectories.gif",
+    #     fps=10,
+    #     seed=42
+    # )

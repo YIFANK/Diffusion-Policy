@@ -15,7 +15,6 @@ import wandb
 from diffusion_policy.utils.visualization import visualize_trajectories
 import pickle
 dataset_path = '../output/save_data/test_workspace.pkl'
-model_path = '../output/blue_diffusion_policy_VLM2Vec.pth'
 
 obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
@@ -26,15 +25,18 @@ Colors = ['Blue', 'Red', 'Green']
 colors = ['blue', 'red', 'green']
 #only use Blue for now
 path_list = [f'../dataset/{color}_{num}.pkl' for color in Colors[:1] for num in [0,1,2,3]]
+#skip the last two datasets
+path_list[2] = None
+path_list[3] = None
 description_list = [f'push the {color} block to the {num} corner' for color in colors[:1] for num in ['lower-right', 'upper-right', 'upper-left', 'lower-left']]
-def train_diffusion_policy(epochs: int = 200,logging : bool = True):
+def train_diffusion_policy(epochs: int = 200,logging : bool = True,noise_pred_net_type: str = 'transformer',model_path = '../trained_models/blue_diffusion_policy_VLM2Vec.pth'):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     #load dataset
     # with open('../output/cached_labels.pkl', 'rb') as f:
     #     cached_labels = pickle.load(f)
     #     print(cached_labels)
     dataset = PushTImageDataset(path_list,description_list, 
-                            pred_horizon=16, obs_horizon=2,action_horizon=8)
+                            pred_horizon=16, obs_horizon=2,action_horizon=8,rotate = True)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=256,
@@ -50,7 +52,8 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True):
                                        action_dim=action_dim,
                                        num_diffusion_iters=100,
                                        vision = True,
-                                       cached_labels_path = '../output/cached_labels.pkl')
+                                       cached_labels_path = '../output/cached_labels.pkl',
+                                       noise_pred_net_type = noise_pred_net_type)
     diffusion_policy.to(device)
     #load pretrained weights if available
     if model_path is not None:
@@ -62,9 +65,6 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True):
             print(f"No pretrained weights found at {model_path}, starting from scratch.")
     # EMA model
     ema = EMAModel(parameters=diffusion_policy.parameters(), power=0.75)
-
-    #cache labels
-    diffusion_policy.encode_text(description_list)
     # Optimizer
     optimizer = torch.optim.AdamW(
         diffusion_policy.parameters(), lr=1e-4, weight_decay=1e-6
@@ -80,7 +80,7 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True):
     if logging:
         wandb.init(
             project="Diffusion Policy",  # give your project a name
-            name="Policy with simple text conditioning",              # (optional) name of the specific run
+            name=f"{noise_pred_net_type}-Policy",              # (optional) name of the specific run
             config={
                 "epochs": epochs,
                 "learning_rate": 1e-4,
@@ -120,7 +120,7 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True):
                         tepoch.set_postfix(loss=loss_cpu)
 
                 tglobal.set_postfix(loss=np.mean(epoch_loss))
-                if epoch_idx % 20 == 0:
+                if epoch_idx % 10 == 0:
                     # sample trajectories from the diffusion policy
                     nimages = nbatch['image'][:1, :obs_horizon].to(device)
                     nagent_poses = nbatch['agent_pos'][:1, :obs_horizon].to(device)
@@ -150,15 +150,8 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True):
                     visualize_trajectories(uncond_naction, n = 10,gif_path=f"../output/uncond_trajectories.gif",background_img=nimage[0][0])
     except Exception as e:
         print(e) 
-        # copy EMA weights into model before saving
-        ema.copy_to(diffusion_policy.parameters())
-        # save model
-        torch.save(diffusion_policy.state_dict(), model_path)
-        print(f"Model saved to {model_path}")
-        del diffusion_policy, ema, optimizer, lr_scheduler  # free memory
     # copy EMA weights into model before saving
     ema.copy_to(diffusion_policy.parameters())
-
     # save model
     torch.save(diffusion_policy.state_dict(), model_path)
     print(f"Model saved to {model_path}")
@@ -167,5 +160,5 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True):
         wandb.finish()  # finish the wandb run
 
 if __name__ == '__main__':
-    train_diffusion_policy(epochs=300,logging = True)  # Adjust epochs as needed
+    train_diffusion_policy(epochs=400,logging = True,noise_pred_net_type = 'unet',model_path = '../trained_models/small_diffusion_policy_VLM2Vec.pth')  # Adjust epochs as needed
     print("Training complete.")

@@ -33,13 +33,13 @@ class FlowMatchingPolicy(nn.Module):
             # self.text_encoder = VisualBertModel.from_pretrained("uclanlp/visualbert-vqa-coco-pre")
             # for param in self.text_encoder.parameters():
             #     param.requires_grad = False  # freeze
-            text_feature_dim = 768
+            self.text_feature_dim = 512
         obs_dim = vision_feature_dim + lowdim_obs_dim
         
         # Flow matching predictor (predicts vector field)
         self.flow_predictor = ConditionalUnet1D(
             input_dim = action_dim,
-            global_cond_dim = obs_dim * obs_horizon + text_feature_dim,
+            global_cond_dim = obs_dim * obs_horizon + self.text_feature_dim,
         )
     
     def forward(self, nimage, nagent_pos, naction, ntext = None, p_uncond = 0.1):
@@ -99,17 +99,27 @@ class FlowMatchingPolicy(nn.Module):
         return loss
 
     def encode_text(self, text_list):
-        text_emb = []
-        for text in text_list:
-            if text in self.cached_labels:
-                text_emb.append(self.cached_labels[text])
-            else:
-                tokens = self.tokenizer(text = text, padding=True, return_tensors="pt").to(next(self.parameters()).device)
-                with torch.no_grad():
-                    emb = self.text_encoder(**tokens).last_hidden_state[:, 0, :] # (B, 768)
-                    text_emb.append(emb)
-                    self.cached_labels[text] = emb
-        return torch.cat(text_emb, dim=0)
+        # If text_list contains tensors, use them directly
+        if isinstance(text_list[0], torch.Tensor):
+            text_emb = text_list
+        else:
+            # Load cached labels if not already loaded
+            if not hasattr(self, '_cached_labels'):
+                with open(self.cached_labels_path, 'rb') as f:
+                    self._cached_labels = pickle.load(f)
+            # Get embeddings for each text
+            try:
+                text_emb = [self._cached_labels[text] for text in text_list]
+            except KeyError as e:
+                raise KeyError(f"Text '{e.args[0]}' not found in cached labels")
+            text_emb = torch.cat(text_emb, dim=0)
+            
+        # Ensure float type
+        text_emb = text_emb.float()
+        # Project through linear layer
+        # text_emb = self.text_encoder(text_emb)
+        
+        return text_emb
 
 
     def get_cond(self, nimage, nagent_pos, ntext, uncond = False):
@@ -128,7 +138,7 @@ class FlowMatchingPolicy(nn.Module):
         if self.text:
             #tokenize text
             if uncond or ntext is None:
-                text_emb = torch.zeros(B, 768, device=nimage.device)
+                text_emb = torch.zeros(B, self.text_feature_dim, device=nimage.device)
             else:
                 text_emb = self.encode_text(ntext)
             obs_cond = torch.cat([obs_cond, text_emb], dim=-1) 

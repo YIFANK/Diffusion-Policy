@@ -24,8 +24,9 @@ action_dim = 2  # action dimension, e.g. 2 for push task
 action_horizon = 8  # number of actions to output, e.g. 8 for push task
 
 dataset_path = '../output/save_data/test_workspace.pkl'
-path_list = [f'../dataset/{color}_{num}.pkl' for color in ['Blue', 'Red', 'Green'] for num in [0,1,2,3]]
-description_list = [f'push the {color} block to the {corner} corner' for color in ['blue', 'red', 'green'] for corner in corner_names]
+Colors = ['Blue', 'Red', 'Green']
+path_list = [f'../dataset/{color}_{num}.pkl' for color in Colors[:1] for num in [0,1,2,3]]
+description_list = [f'push the {color} block to the {corner} corner' for color in Colors[:1] for corner in corner_names]
 dataset = PushTImageDataset(path_list,description_list, 
                             pred_horizon=16, obs_horizon=2,action_horizon=8)
 stats = dataset.stats
@@ -63,25 +64,15 @@ def compute_concept_loss_diffusion(diffusion_policy, nimage, nagent_pos, naction
     # Forward diffusion (q_sample)
     noisy_actions = diffusion_policy.noise_scheduler.add_noise(naction, noise, timesteps)
     
-    # Encode observations 
-    if diffusion_policy.vision:
-        image_features = diffusion_policy.vision_encoder(nimage.flatten(end_dim=1))
-        image_features = image_features.reshape(B, diffusion_policy.obs_horizon, -1)
-        obs_features = torch.cat([image_features, nagent_pos], dim=-1)
-    else:
-        obs_features = nagent_pos
-    obs_cond_base = obs_features.flatten(start_dim=1)
-    
-    # Base prediction: ε_θ(x_t(τ̃), c_0, s_0, t)
-    c0_emb_batch = c0_embedding.unsqueeze(0).repeat(B, 1)
-    obs_cond_c0 = torch.cat([obs_cond_base, c0_emb_batch], dim=-1)
+    # Get base observation conditioning (without text)
+    obs_cond_c0 = diffusion_policy.get_cond(nimage, nagent_pos, None, uncond=True)
     eps_c0 = diffusion_policy.noise_pred_net(noisy_actions, timesteps, global_cond=obs_cond_c0)
     
     # Concept predictions: ε_θ(x_t(τ̃), c̃_k, s_0, t) for each concept k
     eps_concepts = []
     for k in range(K):
-        ck_emb_batch = concept_embeddings[k].unsqueeze(0).repeat(B, 1)
-        obs_cond_ck = torch.cat([obs_cond_base, ck_emb_batch], dim=-1)
+        batch_concept_embeddings = concept_embeddings[k].unsqueeze(0).repeat(B, 1)
+        obs_cond_ck = diffusion_policy.get_cond(nimage, nagent_pos, batch_concept_embeddings, uncond=False)
         eps_ck = diffusion_policy.noise_pred_net(noisy_actions, timesteps, global_cond=obs_cond_ck)
         eps_concepts.append(eps_ck)
     
@@ -131,23 +122,18 @@ def compute_concept_loss_flow_matching(flow_policy, nimage, nagent_pos, naction,
     # The true vector field for straight paths is: v_t = data - noise
     true_vector_field = naction - noise
     
-    # Encode observations
-    if flow_policy.vision:
-        image_features = flow_policy.vision_encoder(nimage.flatten(end_dim=1))
-        image_features = image_features.reshape(B, flow_policy.obs_horizon, -1)
-        obs_features = torch.cat([image_features, nagent_pos], dim=-1)
-    else:
-        obs_features = nagent_pos
-    obs_cond_base = obs_features.flatten(start_dim=1)
+    # Get base observation conditioning (without text)
+    obs_cond_base = flow_policy.get_cond(nimage, nagent_pos, None, uncond=True)
     
     # Scale timesteps to 0-100 range (as expected by flow_predictor)
     timestep_scaled = t * 100
     
     # Base prediction: v_θ(x_t(τ̃), c_0, s_0, t)
+    # Note: Flow matching expects 768-dim text embeddings directly (no projection layer)
     c0_emb_batch = c0_embedding.unsqueeze(0).repeat(B, 1)
     obs_cond_c0 = torch.cat([obs_cond_base, c0_emb_batch], dim=-1)
+    print(obs_cond_c0.shape)
     v_c0 = flow_policy.flow_predictor(x_t, timestep=timestep_scaled, global_cond=obs_cond_c0)
-    
     # Concept predictions: v_θ(x_t(τ̃), c̃_k, s_0, t) for each concept k
     v_concepts = []
     for k in range(K):
@@ -195,8 +181,9 @@ def infer_new_concepts(
     batch_size: int = 512,
     K: int = 2,
     logging: bool = True,
-    init_type: str = "random",
-    task: list = ['blue', 1]):
+    init_type: str = "rand",
+    task: list = ['blue', 1],
+    noise_pred_net_type: str = 'unet'):
     """
     Infer new concept weights from demonstrations using frozen policy (diffusion or flow matching).
     
@@ -220,7 +207,9 @@ def infer_new_concepts(
             action_dim=action_dim,
             num_diffusion_iters=100,
             vision=True,
-            text=True
+            text=True,
+            cached_labels_path = '../output/cached_labels.pkl',
+            noise_pred_net_type = noise_pred_net_type
         )
     elif policy_type == "flow_matching":
         policy = FlowMatchingPolicy(
@@ -230,7 +219,8 @@ def infer_new_concepts(
             action_dim=action_dim,
             num_diffusion_iters=100,
             vision=True,
-            text=True
+            text=True,
+            cached_labels_path = '../output/cached_labels.pkl'
         )
     else:
         raise ValueError(f"Unsupported policy_type: {policy_type}")
@@ -250,19 +240,16 @@ def infer_new_concepts(
     #load the new concept dataset
     new_dataset = PushTImageDataset([new_concept_dataset_path], [0], 
                                    pred_horizon=pred_horizon, obs_horizon=obs_horizon, action_horizon=action_horizon)
-    # Load original semantic is CLIP embeddings of left/right concepts
-    original_embeddings = policy.encode_text(['push the blue block to the upper-right corner',
-    'push the red block to the upper-left corner',
-    'push the green block to the lower-left corner'])
-    print(f"Loaded original semantic embeddings shape: {original_embeddings.shape}")
     print(f"initializing {init_type} concept embeddings")
     # randomly initialize the concept embeddings
-    if init_type == "random":
-        concept_embeddings = torch.randn(K, 512, device=device, requires_grad=True)
+    original_embeddings = policy.encode_text([f'push the {task[0]} block to the {corner_names[task[1]]} corner'])
+    print(f"Loaded original semantic embeddings shape: {original_embeddings.shape}")
+    if init_type == "rand":
+        concept_embeddings = torch.randn(K, 64, device=device, requires_grad=True)
     else:
         concept_embeddings = policy.encode_text([f'push the {task[0]} block to the {corner_names[task[1]]} corner'])
         #require grad is True
-        concept_embeddings.requires_grad = True
+        concept_embeddings = concept_embeddings.detach().clone().requires_grad_(True)
         if init_type == 'fixed':
             #fixed the concept embeddings
             concept_embeddings.requires_grad = False
@@ -279,7 +266,8 @@ def infer_new_concepts(
     # optimizer = torch.optim.Adam([concept_weights], lr=learning_rate)
     # Set up optimizer to optimize both concept weights and embeddings
     optimizer = torch.optim.Adam([concept_weights, concept_embeddings], lr=learning_rate)
-    
+    #set up learning rate scheduler as cosine annealing
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0)
     # Create data loader
     dataloader = torch.utils.data.DataLoader(
         new_dataset, 
@@ -336,7 +324,7 @@ def infer_new_concepts(
             # Backward pass
             loss.backward()
             optimizer.step()
-            
+            scheduler.step()
             epoch_loss += loss.item()
             num_batches += 1
             
@@ -385,7 +373,7 @@ def infer_new_concepts(
                 for step_embs in embedding_trajectory:
                     all_embeddings.extend(step_embs)
                 
-                all_embeddings = np.array([emb.cpu().numpy() if torch.is_tensor(emb) else emb for emb in all_embeddings])
+                all_embeddings = np.array([emb.detach().cpu().numpy() if torch.is_tensor(emb) else emb for emb in all_embeddings])
                 
                 # Fit UMAP on combined data
                 reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=5, min_dist=0.1)
@@ -484,7 +472,8 @@ def infer_new_concepts(
     
     print(f"Learned concept weights saved to: {weights_output_path}")
     print(f"Learned concept embeddings saved to: {embeddings_output_path}")
-    wandb.finish()
+    if logging:
+        wandb.finish()
     return {
         'weights': concept_weights.detach().cpu().numpy(),
         'embeddings': concept_embeddings.detach().cpu().numpy()

@@ -73,7 +73,6 @@ def visualize_trajectories(actions,
     figsize = (5, 5)
     xlim = (-1, 1)
     ylim = (-1, 1)
-
     frames = []
     for t in range(Tp):
         fig, ax = plt.subplots(figsize=figsize)
