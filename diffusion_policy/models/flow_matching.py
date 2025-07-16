@@ -29,11 +29,12 @@ class FlowMatchingPolicy(nn.Module):
             
         if text:
             print("Using text encoder")
-            # self.tokenizer = BertTokenizer.from_pretrained("google-bert/bert-base-uncased")
-            # self.text_encoder = VisualBertModel.from_pretrained("uclanlp/visualbert-vqa-coco-pre")
-            # for param in self.text_encoder.parameters():
-            #     param.requires_grad = False  # freeze
-            self.text_feature_dim = 512
+            self.text_encoder = nn.Sequential(
+                nn.Linear(512,256),
+                nn.ReLU(),
+                nn.Linear(256, 64)
+            )
+            self.text_feature_dim = 64
         obs_dim = vision_feature_dim + lowdim_obs_dim
         
         # Flow matching predictor (predicts vector field)
@@ -117,7 +118,7 @@ class FlowMatchingPolicy(nn.Module):
         # Ensure float type
         text_emb = text_emb.float()
         # Project through linear layer
-        # text_emb = self.text_encoder(text_emb)
+        text_emb = self.text_encoder(text_emb)
         
         return text_emb
 
@@ -140,7 +141,10 @@ class FlowMatchingPolicy(nn.Module):
             if uncond or ntext is None:
                 text_emb = torch.zeros(B, self.text_feature_dim, device=nimage.device)
             else:
-                text_emb = self.encode_text(ntext)
+                if isinstance(ntext, list):
+                    text_emb = self.encode_text(ntext)
+                else:
+                    text_emb = ntext
             obs_cond = torch.cat([obs_cond, text_emb], dim=-1) 
         return obs_cond
     

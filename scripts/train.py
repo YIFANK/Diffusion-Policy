@@ -24,19 +24,19 @@ action_horizon = 8  # number of actions to output, e.g. 8 for push task
 Colors = ['Blue', 'Red', 'Green']
 colors = ['blue', 'red', 'green']
 #only use Blue for now
-path_list = [f'../dataset/{color}_{num}.pkl' for color in Colors[:1] for num in [0,1,2,3]]
+path_list = [f'../dataset/{color}_{num}.pkl' for color in Colors for num in [0,1,2,3]]
 #skip the last two datasets
-path_list[2] = None
-path_list[3] = None
-description_list = [f'push the {color} block to the {num} corner' for color in colors[:1] for num in ['lower-right', 'upper-right', 'upper-left', 'lower-left']]
+# path_list[2] = None
+# path_list[3] = None
+description_list = [f'push the {color} block to the {num} corner' for color in colors for num in ['lower-right', 'upper-right', 'upper-left', 'lower-left']]
 def train_diffusion_policy(epochs: int = 200,logging : bool = True,noise_pred_net_type: str = 'transformer',model_path = '../trained_models/blue_diffusion_policy_VLM2Vec.pth'):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     #load dataset
-    # with open('../output/cached_labels.pkl', 'rb') as f:
-    #     cached_labels = pickle.load(f)
-    #     print(cached_labels)
+    with open('../output/cached_labels.pkl', 'rb') as f:
+        cached_labels = pickle.load(f)
+        print(cached_labels['push the blue block to the lower-right corner'].shape)
     dataset = PushTImageDataset(path_list,description_list, 
-                            pred_horizon=16, obs_horizon=2,action_horizon=8,rotate = True)
+                            pred_horizon=16, obs_horizon=2,action_horizon=8,rotate = False)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=256,
@@ -56,18 +56,32 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True,noise_pred_ne
                                        noise_pred_net_type = noise_pred_net_type)
     diffusion_policy.to(device)
     #load pretrained weights if available
-    if model_path is not None:
-        try:
-            state_dict = torch.load(model_path, map_location=device)
-            diffusion_policy.load_state_dict(state_dict)
-            print(f"Loaded pretrained weights from {model_path}")
-        except FileNotFoundError:
-            print(f"No pretrained weights found at {model_path}, starting from scratch.")
+    # if model_path is not None:
+    #     try:
+    #         state_dict = torch.load(model_path, map_location=device)
+    #         diffusion_policy.load_state_dict(state_dict)
+    #         print(f"Loaded pretrained weights from {model_path}")
+    #     except FileNotFoundError:
+    #         print(f"No pretrained weights found at {model_path}, starting from scratch.")
     # EMA model
     ema = EMAModel(parameters=diffusion_policy.parameters(), power=0.75)
-    # Optimizer
+    # Optimizer for text encoder and other parameters separately
+    # Get the names of parameters from diffusion_policy and text_encoder
+    # Get text encoder parameters
+    text_encoder_params = list(diffusion_policy.text_encoder.parameters())
+    text_encoder_param_ids = set(id(p) for p in text_encoder_params)
+
+    # Get all other parameters that are not in text encoder
+    other_params = [p for p in diffusion_policy.parameters() 
+                   if id(p) not in text_encoder_param_ids]
+
+    # Set up optimizer with disjoint parameter groups
     optimizer = torch.optim.AdamW(
-        diffusion_policy.parameters(), lr=1e-4, weight_decay=1e-6
+        [
+            {'params': other_params, 'lr': 1e-4},
+            {'params': text_encoder_params, 'lr': 1e-2}
+        ],
+        weight_decay=1e-6
     )
 
     # LR scheduler
@@ -148,8 +162,8 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True,noise_pred_ne
                     uncond_naction = uncond_naction.detach().to('cpu').numpy()
                     visualize_trajectories(naction, n = 10,gif_path=f"../output/{ntexts[0]}.gif",background_img=nimage[0][0])
                     visualize_trajectories(uncond_naction, n = 10,gif_path=f"../output/uncond_trajectories.gif",background_img=nimage[0][0])
-    except Exception as e:
-        print(e) 
+    except KeyboardInterrupt:
+        print("Keyboard interrupt") 
     # copy EMA weights into model before saving
     ema.copy_to(diffusion_policy.parameters())
     # save model
@@ -160,5 +174,5 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True,noise_pred_ne
         wandb.finish()  # finish the wandb run
 
 if __name__ == '__main__':
-    train_diffusion_policy(epochs=400,logging = True,noise_pred_net_type = 'unet',model_path = '../trained_models/small_diffusion_policy_VLM2Vec.pth')  # Adjust epochs as needed
+    train_diffusion_policy(epochs=200,logging = True,noise_pred_net_type = 'unet',model_path = '../trained_models/frozen_resnet.pth')  # Adjust epochs as needed
     print("Training complete.")

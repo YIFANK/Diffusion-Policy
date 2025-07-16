@@ -18,6 +18,7 @@ matplotlib>=3.4.0
 imageio[ffmpeg]>=2.9.0
 pygame>=2.0.0
 tqdm>=4.62.0
+umap-learn>=0.5.0
 
 # Machine learning utilities
 wandb>=0.12.0

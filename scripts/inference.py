@@ -1,5 +1,7 @@
 #@markdown ### **Inference**
 import sys
+print(sys.path)
+import sys
 import os
 # Add parent directory to path so we can import diffusion_policy
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -88,9 +90,6 @@ corner_names = ['lower-right', 'upper-right', 'upper-left', 'lower-left']
 dataset_path = '../output/save_data/test_workspace.pkl'
 path_list = [f'../dataset/{color}_{num}.pkl' for color in ['Blue', 'Red', 'Green'] for num in [0,1,2,3]]
 description_list = [f'push the {color} block to the {corner} corner' for color in ['blue', 'red', 'green'] for corner in corner_names]
-dataset = PushTImageDataset(path_list,description_list, 
-                            pred_horizon=16, obs_horizon=2,action_horizon=8)
-stats = dataset.stats
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 seed = 42
 
@@ -215,6 +214,12 @@ def evaluate(max_steps = 200,
             init_type = 'original',
             noise_pred_net_type = 'unet'):
     """Evaluate the policy (diffusion or flow matching) on the PushTImageEnv."""
+    #model name is the model path without the extension
+    model_name = model_path.split('/')[-1].split('.')[0]
+    print(f"Model name: {model_name}")
+    dataset = PushTImageDataset(path_list,description_list, 
+                            pred_horizon=16, obs_horizon=2,action_horizon=8)
+    stats = dataset.stats
     # load the policy
     if policy_type == "diffusion":
         policy = DiffusionPolicy(
@@ -240,8 +245,8 @@ def evaluate(max_steps = 200,
     #save episode scores to a file
     task_str = task[0] + str(task[1])
     #create the directory if it doesn't exist
-    os.makedirs(os.path.join('../output/eval/', task_str,policy_type, init_type), exist_ok=True)
-    f = open(os.path.join('../output/eval/', task_str,policy_type, init_type, 'episode_scores.txt'), 'w')
+    os.makedirs(os.path.join('../output/eval/', model_name,task_str,policy_type, init_type), exist_ok=True)
+    f = open(os.path.join('../output/eval/', model_name,task_str,policy_type, init_type, 'episode_scores.txt'), 'w')
     f.write(f"Task: {task[0]} {corner_names[task[1]]}\n")
     f.write(f"Policy type: {policy_type}\n")
     f.write(f"Learning initial type: {init_type}\n")
@@ -263,6 +268,7 @@ def evaluate(max_steps = 200,
     tot_score = 0
     all_actions = []
     print(f"Using {embedding_type} concept weights")
+    tot_steps = 0
     for episode in range(1,num_episodes+1):
         yaml_idx = task_names.index(task[0])
         cfg = OmegaConf.create(yamls[yaml_idx])
@@ -354,7 +360,7 @@ def evaluate(max_steps = 200,
                 visualize_trajectories(
                     naction,
                     n=10,
-                    gif_path=os.path.join('../output/eval/', f'sample_trajectories.gif'),
+                    gif_path=os.path.join(f'../output/eval/{model_name}', f'sample_trajectories.gif'),
                     fps=10,
                     seed=seed,
                     background_img = images[-1]
@@ -392,24 +398,29 @@ def evaluate(max_steps = 200,
         actions = np.stack(actions)
         all_actions.append(actions)
         # save the images as a gif
-        print(f"Episode {episode} score: {sum(rewards)}")
+        print(f"Episode {episode} score: {sum(rewards)}, steps: {step_idx}")
         f.write(f"{sum(rewards)}\n")
         if render:
             print(f"Saving episode {episode} gif")
-            images_to_gif(imgs, os.path.join('../output/eval/', task_str,policy_type, init_type,f'episode_{episode}.gif'), fps=10)
+            images_to_gif(imgs, os.path.join('../output/eval/', model_name,task_str,policy_type, init_type,f'episode_{episode}.gif'), fps=10)
+        if step_idx < max_steps:
+            tot_steps += step_idx
     if render:
         #padding the last action to make all actions same length
         trajs = pad_and_stack_trajectories(all_actions)
         visualize_trajectories(
             trajs,
             n=num_episodes,
-            gif_path=os.path.join('../output/eval/', task_str,policy_type, init_type, 'all_episodes.gif'),
+            gif_path=os.path.join('../output/eval/', model_name,task_str,policy_type, init_type, 'all_episodes.gif'),
             fps=10,
             seed=seed
         )
     print(f"Total score: {tot_score} over {num_episodes} episodes")
+    print(f"Total steps: {tot_steps} over {tot_score} winning episodes")
     f.write(f"Total score: {tot_score} over {num_episodes} episodes\n")
+    f.write(f"Total steps: {tot_steps} over {tot_score} winning episodes\n")
     f.close()
+    return tot_score
 
 def run_inference_flow():
     learned_weights = None

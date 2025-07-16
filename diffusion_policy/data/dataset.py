@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from tiny_embodied_reasoning.workspace import utils as utils
-def preprocess(dataset_path):
+def preprocess(dataset_path,num_trajectories = None):
     if dataset_path is None:
         return None
     scenes = utils.load_trajectories_pickle(dataset_path)
@@ -13,6 +13,9 @@ def preprocess(dataset_path):
     frame_idx = 0
     for scene in scenes:
         # print(len(scene.trajectories))
+        if num_trajectories is not None:
+            scene.trajectories = scene.trajectories[:min(num_trajectories,len(scene.trajectories))]
+        print(f"processing scene with length: {len(scene.trajectories)}")
         for traj in scene.trajectories:
             states = traj.data
             for state in states:
@@ -153,7 +156,8 @@ class PushTImageDataset(torch.utils.data.Dataset):
                  pred_horizon: int,
                  obs_horizon: int,
                  action_horizon: int,
-                 rotate: bool = False):
+                 rotate: bool = False,
+                 num_trajectories: int = None):
         
         assert len(dataset_paths) == len(text_conditions), "Each dataset must have a corresponding text condition."
 
@@ -164,7 +168,7 @@ class PushTImageDataset(torch.utils.data.Dataset):
         all_text_conditions = []
 
         total_offset = 0  # to track episode ends across datasets
-        dataset_list = [preprocess(dataset_path) for dataset_path in dataset_paths]
+        dataset_list = [preprocess(dataset_path,num_trajectories = num_trajectories) for dataset_path in dataset_paths]
         for i, text_cond in enumerate(text_conditions):
             if rotate:
                 for j in range(4):

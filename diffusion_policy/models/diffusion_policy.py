@@ -36,10 +36,20 @@ class DiffusionPolicy(nn.Module):
         vision_feature_dim = 0
         text_feature_dim = 0
         self.vision, self.text = vision, text
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         if vision:
             print("Using vision encoder")
-            self.vision_encoder = get_resnet('resnet18')
-            self.vision_encoder = replace_bn_with_gn(self.vision_encoder)
+            #vision encoder = frozen resnet
+            self.vision_encoder = replace_bn_with_gn(get_resnet('resnet18'))
+            # self.vision_encoder = nn.Sequential(
+            #     replace_bn_with_gn(get_resnet('resnet18')),
+            #     nn.Linear(512, 128),
+            #     nn.ReLU(),
+            #     nn.Linear(128, 128),
+            #     nn.ReLU(),
+            #     nn.Linear(128, 128),
+            # )
+            #freeze the resnet
             vision_feature_dim = 512 # resnet18 output
         if text:
             # self.text_encoder = AutoModel.from_pretrained('bert-base-uncased')
@@ -48,11 +58,13 @@ class DiffusionPolicy(nn.Module):
             print("Using text encoder")
             #use linear projection as text encoder
             self.text_encoder = nn.Sequential(
-                nn.Linear(3584, 1024),
+                nn.Linear(3584,128),
                 nn.ReLU(),
-                nn.Linear(1024, 512),
+                nn.Linear(128, 128),
                 nn.ReLU(),
-                nn.Linear(512, 64)
+                nn.Linear(128,128),
+                nn.ReLU(),
+                nn.Linear(128,64)
             )
             text_feature_dim = 64
             self.text_feature_dim = 64
@@ -76,11 +88,8 @@ class DiffusionPolicy(nn.Module):
             print("Using Transformer-based noise prediction network")
             self.noise_pred_net = ConditionalTransformer1D(
                 input_dim=action_dim,
-                global_cond_dim=obs_dim * obs_horizon + text_feature_dim,
-                n_layers=6,  # Slightly smaller for efficiency
-                n_heads=8,
-                d_model=256,
-                d_ff=1024,
+                obs_dim=obs_dim,
+                global_cond_dim=text_feature_dim,
                 max_seq_len=pred_horizon
             )
         else:
@@ -109,7 +118,7 @@ class DiffusionPolicy(nn.Module):
             except KeyError as e:
                 raise KeyError(f"Text '{e.args[0]}' not found in cached labels")
             text_emb = torch.cat(text_emb, dim=0)
-            
+        # print(text_emb.shape)
         # Ensure float type
         text_emb = text_emb.float()
         # Project through linear layer

@@ -16,7 +16,7 @@ import wandb
 from diffusion_policy.utils.visualization import visualize_trajectories
 
 dataset_path = '../output/save_data/test_workspace.pkl'
-model_path = '../trained_models/small_flow_policy_CLIP.pth'
+model_path = '../trained_models/large_flow_policy_random.pth'
 
 obs_horizon = 2  # number of observations to stack
 pred_horizon = 16  # number of actions to predict
@@ -24,14 +24,12 @@ action_dim = 2  # action dimension, e.g. 2 for push task
 action_horizon = 8  # number of actions to output, e.g. 8 for push task
 Colors = ['Blue', 'Red', 'Green']
 colors = ['blue', 'red', 'green']
-path_list = [f'../dataset/{color}_{num}.pkl' for color in Colors[:1] for num in [0,1,2,3]]
-path_list[2] = None
-path_list[3] = None
-description_list = [f'push the {color} block to the {num} corner' for color in colors[:1] for num in ['lower-right', 'upper-right', 'upper-left', 'lower-left']]
+path_list = [f'../dataset/{color}_{num}.pkl' for color in Colors for num in [0,1,2,3]]
+description_list = [f'push the {color} block to the {num} corner' for color in colors for num in ['lower-right', 'upper-right', 'upper-left', 'lower-left']]
 def train_flow_policy(epochs: int = 100,logging : bool = True):
     #load dataset
     dataset = PushTImageDataset(path_list,description_list, 
-                            pred_horizon=16, obs_horizon=2,action_horizon=8, rotate = True)
+                            pred_horizon=16, obs_horizon=2,action_horizon=8, rotate = False)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=256,
@@ -48,7 +46,7 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
                                        action_dim=action_dim,
                                        num_diffusion_iters=100,
                                        vision = True,
-                                       cached_labels_path = '../output/CLIP_embeddings.pkl')
+                                       cached_labels_path = '../output/random_embeddings.pkl')
     flow_policy.to(device)
     #load pretrained weights if available
     # if os.path.exists(model_path):
@@ -155,5 +153,5 @@ def train_flow_policy(epochs: int = 100,logging : bool = True):
         wandb.finish()  # finish the wandb run
 
 if __name__ == '__main__':
-    train_flow_policy(epochs=200,logging = True)  # Adjust epochs as needed
+    train_flow_policy(epochs=100,logging = True)  # Adjust epochs as needed
     print("Training complete.")

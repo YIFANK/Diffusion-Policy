@@ -282,23 +282,9 @@ class ConditionalUnet1D(nn.Module):
 
 
 class ConditionalTransformer1D(nn.Module):
-    """
-    Transformer-based diffusion model for 1D sequence prediction.
-    
-    Args:
-        input_dim: Dimension of input actions
-        global_cond_dim: Dimension of global conditioning
-        diffusion_step_embed_dim: Dimension of timestep embedding
-        n_layers: Number of transformer layers
-        n_heads: Number of attention heads
-        d_model: Hidden dimension of transformer
-        d_ff: Feed-forward dimension
-        dropout: Dropout rate
-        max_seq_len: Maximum sequence length for positional encoding
-        type: Type of timestep embedding ('sinusoidal' or 'learnable')
-    """
     def __init__(self,
                  input_dim,
+                 obs_dim,
                  global_cond_dim,
                  diffusion_step_embed_dim=256,
                  n_layers=8,
@@ -307,118 +293,85 @@ class ConditionalTransformer1D(nn.Module):
                  d_ff=2048,
                  dropout=0.1,
                  max_seq_len=1024,
+                 max_obs_len=64,
                  type='sinusoidal'):
         super().__init__()
         
-        self.input_dim = input_dim
         self.d_model = d_model
-        self.max_seq_len = max_seq_len
         
-        # Input projection
-        self.input_proj = nn.Linear(input_dim, d_model)
+        # Input projections
+        self.input_proj = nn.Linear(input_dim, d_model)      # Actions → query
+        self.obs_proj = nn.Linear(obs_dim, d_model)          # Observations → memory (key/value)
+        self.global_proj = nn.Linear(global_cond_dim, d_model)  # Global conditioning → optional memory token
         
-        # Timestep embedding
-        dsed = diffusion_step_embed_dim
-        if type == 'sinusoidal':
-            self.time_encoder = nn.Sequential(
-                SinusoidalPosEmb(dsed),
-                nn.Linear(dsed, dsed * 4),
-                nn.Mish(),
-                nn.Linear(dsed * 4, dsed),
-            )
-        else:
-            self.time_encoder = LearnableTimeEmbedding(dsed)
-        
-        # Global conditioning projection
-        cond_dim = dsed + global_cond_dim
-        self.global_cond_proj = nn.Linear(cond_dim, d_model)
-        
-        # Positional encoding for sequence positions
+        # Positional encodings
         self.pos_encoding = nn.Parameter(torch.randn(max_seq_len, d_model) * 0.02)
+        self.obs_encoding = nn.Parameter(torch.randn(max_obs_len, d_model) * 0.02)
         
-        # Transformer layers
-        encoder_layer = nn.TransformerEncoderLayer(
+        # Diffusion step embedding
+        dsed = diffusion_step_embed_dim
+        self.time_encoder = nn.Sequential(
+            SinusoidalPosEmb(dsed),
+            nn.Linear(dsed, dsed * 4),
+            nn.Mish(),
+            nn.Linear(dsed * 4, dsed)
+        )
+        
+        # Project diffusion step + global conditioning together
+        self.global_cond_proj = nn.Linear(dsed + global_cond_dim, global_cond_dim)
+        
+        # Transformer decoder
+        decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
             nhead=n_heads,
             dim_feedforward=d_ff,
             dropout=dropout,
-            activation='gelu',
             batch_first=True,
             norm_first=True
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=n_layers)
         
         # Output projection
         self.output_proj = nn.Linear(d_model, input_dim)
-        
-        # Layer normalization
-        self.layer_norm = nn.LayerNorm(d_model)
-        
-        print("Transformer number of parameters: {:e}".format(
-            sum(p.numel() for p in self.parameters()))
-        )
     
-    def forward(self,
-                sample: torch.Tensor,
-                timestep: Union[torch.Tensor, float, int],
-                global_cond=None):
+    def forward(self, sample, obs_seq, timestep, global_cond):
         """
-        Forward pass of the transformer.
-        
-        Args:
-            sample: (B, T, input_dim) - noisy action sequence
-            timestep: (B,) or int - diffusion timestep
-            global_cond: (B, global_cond_dim) - global conditioning
-            
-        Returns:
-            output: (B, T, input_dim) - predicted noise
+        sample: (B, T, input_dim)
+        obs_seq: (B, To, obs_dim)
+        timestep: (B,) or scalar
+        global_cond: (B, global_cond_dim)
         """
         B, T, _ = sample.shape
+        _, To, _ = obs_seq.shape
         
-        # Handle timestep
+        # Diffusion step embedding
         if not torch.is_tensor(timestep):
             timestep = torch.tensor([timestep], dtype=torch.float32, device=sample.device)
-        elif torch.is_tensor(timestep) and len(timestep.shape) == 0:
-            timestep = timestep[None].to(sample.device)
-        timestep = timestep.expand(B)
+        if timestep.ndim == 0:
+            timestep = timestep.unsqueeze(0).expand(B)
+        else:
+            timestep = timestep.expand(B)
         
-        # Get timestep embedding
         time_emb = self.time_encoder(timestep)  # (B, dsed)
-        
-        # Combine with global conditioning
-        if global_cond is not None:
-            global_feature = torch.cat([time_emb, global_cond], dim=-1)  # (B, dsed + global_cond_dim)
-        else:
-            global_feature = time_emb
-        
-        # Project global conditioning
-        global_cond_emb = self.global_cond_proj(global_feature)  # (B, d_model)
-        global_cond_emb = global_cond_emb.unsqueeze(1)  # (B, 1, d_model)
-        
-        # Project input to transformer dimension
+        global_feature = torch.cat([time_emb, global_cond], dim=-1)
+        global_feature = self.global_cond_proj(global_feature)  # (B, global_cond_dim)
+        global_feature = self.global_proj(global_feature).unsqueeze(1)  # (B, 1, d_model)
+
+        # Input projection
         x = self.input_proj(sample)  # (B, T, d_model)
+        obs = self.obs_proj(obs_seq)  # (B, To, d_model)
         
-        # Add positional encoding
-        if T <= self.max_seq_len:
-            pos_emb = self.pos_encoding[:T].unsqueeze(0)  # (1, T, d_model)
-            x = x + pos_emb
-        else:
-            # Handle sequences longer than max_seq_len by interpolating
-            pos_indices = torch.linspace(0, self.max_seq_len-1, T, device=x.device).long()
-            pos_emb = self.pos_encoding[pos_indices].unsqueeze(0)  # (1, T, d_model)
-            x = x + pos_emb
+        # Positional encoding
+        pos_x = self.pos_encoding[:T].unsqueeze(0)  # (1, T, d_model)
+        pos_obs = self.obs_encoding[:To].unsqueeze(0)  # (1, To, d_model)
+        x = x + pos_x
+        obs = obs + pos_obs
         
-        # Prepend global conditioning as first token
-        x = torch.cat([global_cond_emb, x], dim=1)  # (B, 1+T, d_model)
+        # Combine observation sequence with global feature
+        memory = torch.cat([global_feature, obs], dim=1)  # (B, 1 + To, d_model)
         
-        # Apply layer normalization
-        x = self.layer_norm(x)
+        # Transformer decoder: cross-attention from action queries (x) to observation memory
+        x = self.transformer_decoder(tgt=x, memory=memory)  # (B, T, d_model)
         
-        # Apply transformer
-        x = self.transformer(x)  # (B, 1+T, d_model)
-        
-        # Remove global conditioning token and project to output
-        x = x[:, 1:, :]  # (B, T, d_model)
         output = self.output_proj(x)  # (B, T, input_dim)
-        
         return output
