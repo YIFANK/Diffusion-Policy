@@ -29,31 +29,50 @@ path_list = [f'../dataset/{color}_{num}.pkl' for color in Colors for num in [0,1
 # path_list[2] = None
 # path_list[3] = None
 description_list = [f'push the {color} block to the {num} corner' for color in colors for num in ['lower-right', 'upper-right', 'upper-left', 'lower-left']]
-def train_diffusion_policy(epochs: int = 200,logging : bool = True,noise_pred_net_type: str = 'transformer',model_path = '../trained_models/blue_diffusion_policy_VLM2Vec.pth'):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def train_diffusion_policy(epochs: int = 200,logging : bool = True,noise_pred_net_type: str = 'transformer',model_path = '../trained_models/blue_diffusion_policy_VLM2Vec.pth',
+                           dataset_paths: list = None, descriptions: list = None,
+                           vision: bool = True, state_keys: tuple = ('agent',),
+                           p_uncond: float = 0.1,
+                           early_frames: int = 0, early_weight: float = 5.0,
+                           text_lr: float = 1e-2, text_gate: bool = False):
+    """dataset_paths/descriptions default to the 12 base goal-conditioned tasks;
+    pass explicit lists to train on other splits (e.g. behavior-mode datasets).
+    vision=False trains a state-based policy: set state_keys to the entities
+    whose positions form the low-dim observation, e.g. ('agent','o1')."""
+    if dataset_paths is None:
+        dataset_paths = path_list
+    if descriptions is None:
+        descriptions = description_list
+    assert len(dataset_paths) == len(descriptions)
+    lowdim_obs_dim = 2 * len(state_keys)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     #load dataset
     with open('../output/cached_labels.pkl', 'rb') as f:
         cached_labels = pickle.load(f)
-        print(cached_labels['push the blue block to the lower-right corner'].shape)
-    dataset = PushTImageDataset(path_list,description_list, 
-                            pred_horizon=16, obs_horizon=2,action_horizon=8,rotate = False)
+        for d in descriptions:
+            assert d in cached_labels, f"description not in cached_labels: {d}"
+    dataset = PushTImageDataset(dataset_paths,descriptions,
+                            pred_horizon=16, obs_horizon=2,action_horizon=8,rotate = False,
+                            state_keys = state_keys)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=256,
-        num_workers=8,
+        # keep workers low: macOS spawn copies the whole in-memory dataset
+        # (~2GB float32 images) into every worker — 8 workers swamped a 16GB machine
+        num_workers=2,
         shuffle=True,
-        # accelerate cpu-gpu transfer
-        pin_memory=True,
+        pin_memory=False,  # no effect on MPS
         # don't kill worker process afte each epoch
         persistent_workers=True
     )
     diffusion_policy = DiffusionPolicy(obs_horizon=obs_horizon, pred_horizon=pred_horizon,
-                                       lowdim_obs_dim=2,
+                                       lowdim_obs_dim=lowdim_obs_dim,
                                        action_dim=action_dim,
                                        num_diffusion_iters=100,
-                                       vision = True,
+                                       vision = vision,
                                        cached_labels_path = '../output/cached_labels.pkl',
-                                       noise_pred_net_type = noise_pred_net_type)
+                                       noise_pred_net_type = noise_pred_net_type,
+                                       text_gate = text_gate)
     diffusion_policy.to(device)
     #load pretrained weights if available
     # if model_path is not None:
@@ -76,10 +95,14 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True,noise_pred_ne
                    if id(p) not in text_encoder_param_ids]
 
     # Set up optimizer with disjoint parameter groups
+    # NOTE: text_lr=1e-2 (the historical default) can kill the text pathway:
+    # early in training text gradients are noise, and 100x lr + ReLU collapses
+    # the projection MLP into a constant function before text becomes useful
+    # (observed: pairwise conditional delta == exactly 0 after training).
     optimizer = torch.optim.AdamW(
         [
             {'params': other_params, 'lr': 1e-4},
-            {'params': text_encoder_params, 'lr': 1e-2}
+            {'params': text_encoder_params, 'lr': text_lr}
         ],
         weight_decay=1e-6
     )
@@ -115,8 +138,16 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True,noise_pred_ne
                         nagent_pos = nbatch['agent_pos'][:, :obs_horizon].to(device)
                         naction = nbatch['action'].to(device)
                         ntext = nbatch['text']
+                        # decision-frame upweighting: early episode frames are
+                        # where the conditioning must break behavioral symmetry
+                        sample_weights = None
+                        if early_frames > 0:
+                            rel = nbatch['rel_frame']
+                            sample_weights = 1.0 + (rel < early_frames).float() * (early_weight - 1.0)
                         # call forward() to compute loss
-                        loss = diffusion_policy(nimage, nagent_pos, naction, ntext)
+                        loss = diffusion_policy(nimage, nagent_pos, naction, ntext,
+                                                p_uncond=p_uncond,
+                                                sample_weights=sample_weights)
                         if logging:
                             wandb.log({"loss": loss.item()})
                         # optimize
@@ -139,7 +170,7 @@ def train_diffusion_policy(epochs: int = 200,logging : bool = True,noise_pred_ne
                     nimages = nbatch['image'][:1, :obs_horizon].to(device)
                     nagent_poses = nbatch['agent_pos'][:1, :obs_horizon].to(device)
                     #random description
-                    ntexts = [description_list[np.random.randint(0, len(description_list))]]
+                    ntexts = [descriptions[np.random.randint(0, len(descriptions))]]
                     naction = diffusion_policy.sample(
                         nimages=nimages,
                         nagent_poses=nagent_poses,

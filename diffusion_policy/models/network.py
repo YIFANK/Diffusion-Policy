@@ -135,6 +135,33 @@ class ConditionalResidualBlock1D(nn.Module):
         return out
 
 
+class CrossAttnBlock1D(nn.Module):
+    """Token-level language injection for the 1D UNet: queries are the action
+    sequence features, keys/values are text tokens. Residual, pre-norm; output
+    projection zero-initialized so insertion is identity at start of training.
+    Used by the x-attn ablation (language moves from pooled-concat FiLM to
+    per-token attention; the observation pathway is untouched)."""
+
+    def __init__(self, channels, token_dim=512, n_heads=4):
+        super().__init__()
+        self.norm = nn.GroupNorm(8, channels)
+        self.q_proj = nn.Linear(channels, channels)
+        self.kv_proj = nn.Linear(token_dim, channels * 2)
+        self.attn = nn.MultiheadAttention(channels, n_heads, batch_first=True)
+        self.out = nn.Linear(channels, channels)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, x, tokens, token_mask=None):
+        # x: (B, C, T); tokens: (B, L, token_dim); token_mask: (B, L) True=pad
+        h = self.norm(x).transpose(1, 2)          # (B, T, C)
+        q = self.q_proj(h)
+        k, v = self.kv_proj(tokens).chunk(2, dim=-1)
+        a, _ = self.attn(q, k, v, key_padding_mask=token_mask,
+                         need_weights=False)
+        return x + self.out(a).transpose(1, 2)
+
+
 class ConditionalUnet1D(nn.Module):
     def __init__(self,
         input_dim,
@@ -143,7 +170,9 @@ class ConditionalUnet1D(nn.Module):
         down_dims=[256,512,1024],
         kernel_size=5,
         n_groups=8,
-        type = 'sinusoidal'
+        type = 'sinusoidal',
+        text_xattn=False,
+        token_dim=512,
         ):
         """
         input_dim: Dim of actions.
@@ -221,6 +250,13 @@ class ConditionalUnet1D(nn.Module):
         self.down_modules = down_modules
         self.final_conv = final_conv
 
+        # x-attn ablation: one token-attention block per down level + mid
+        self.text_xattn = text_xattn
+        if text_xattn:
+            self.down_xattn = nn.ModuleList(
+                [CrossAttnBlock1D(dim_out, token_dim) for _, dim_out in in_out])
+            self.mid_xattn = CrossAttnBlock1D(mid_dim, token_dim)
+
         print("number of parameters: {:e}".format(
             sum(p.numel() for p in self.parameters()))
         )
@@ -228,11 +264,15 @@ class ConditionalUnet1D(nn.Module):
     def forward(self,
             sample: torch.Tensor,
             timestep: Union[torch.Tensor, float, int],
-            global_cond=None):
+            global_cond=None,
+            text_tokens=None,
+            token_mask=None):
         """
         x: (B,T,input_dim)
         timestep: (B,) or int, diffusion step
         global_cond: (B,global_cond_dim)
+        text_tokens: (B,L,token_dim) CLIP token sequence (x-attn ablation only)
+        token_mask: (B,L) bool, True = padding
         output: (B,T,input_dim)
         """
         # (B,T,C)
@@ -261,11 +301,15 @@ class ConditionalUnet1D(nn.Module):
         for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
             x = resnet(x, global_feature)
             x = resnet2(x, global_feature)
+            if self.text_xattn and text_tokens is not None:
+                x = self.down_xattn[idx](x, text_tokens, token_mask)
             h.append(x)
             x = downsample(x)
 
         for mid_module in self.mid_modules:
             x = mid_module(x, global_feature)
+        if self.text_xattn and text_tokens is not None:
+            x = self.mid_xattn(x, text_tokens, token_mask)
 
         for idx, (resnet, resnet2, upsample) in enumerate(self.up_modules):
             x = torch.cat((x, h.pop()), dim=1)

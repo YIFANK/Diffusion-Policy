@@ -90,7 +90,7 @@ corner_names = ['lower-right', 'upper-right', 'upper-left', 'lower-left']
 dataset_path = '../output/save_data/test_workspace.pkl'
 path_list = [f'../dataset/{color}_{num}.pkl' for color in ['Blue', 'Red', 'Green'] for num in [0,1,2,3]]
 description_list = [f'push the {color} block to the {corner} corner' for color in ['blue', 'red', 'green'] for corner in corner_names]
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 seed = 42
 
 from diffusion_policy.models.diffusion_policy import DiffusionPolicy
@@ -212,23 +212,28 @@ def evaluate(max_steps = 200,
             policy_type = "diffusion",
             task = ['blue', 1],
             init_type = 'original',
-            noise_pred_net_type = 'unet'):
-    """Evaluate the policy (diffusion or flow matching) on the PushTImageEnv."""
+            noise_pred_net_type = 'unet',
+            vision = True,
+            state_keys = ('agent',)):
+    """Evaluate the policy (diffusion or flow matching) on the PushTImageEnv.
+    vision=False evaluates a state-based policy; state_keys defines the low-dim
+    observation (entity positions, e.g. ('agent','o1'))."""
     #model name is the model path without the extension
     model_name = model_path.split('/')[-1].split('.')[0]
     print(f"Model name: {model_name}")
-    dataset = PushTImageDataset(path_list,description_list, 
-                            pred_horizon=16, obs_horizon=2,action_horizon=8)
+    dataset = PushTImageDataset(path_list,description_list,
+                            pred_horizon=16, obs_horizon=2,action_horizon=8,
+                            state_keys=state_keys)
     stats = dataset.stats
     # load the policy
     if policy_type == "diffusion":
         policy = DiffusionPolicy(
             obs_horizon=obs_horizon,
             pred_horizon=pred_horizon,
-            lowdim_obs_dim=2,
+            lowdim_obs_dim=2*len(state_keys),
             action_dim=action_dim,
             num_diffusion_iters=100,
-            vision=True,
+            vision=vision,
             text=True,
             cached_labels_path = '../output/cached_labels.pkl',
             noise_pred_net_type = noise_pred_net_type
@@ -292,9 +297,13 @@ def evaluate(max_steps = 200,
             else:
                 reward = 0
                 done = False
+            lowdim = np.concatenate([
+                np.asarray(env.agent.position, dtype=np.float32) if k == 'agent'
+                else np.asarray(state[k]['position'], dtype=np.float32)[:2]
+                for k in state_keys])
             x = {
                 'image': img,
-                'agent_pos': env.agent.position
+                'agent_pos': lowdim
             }
             return x, reward, done, info
         # get first observation
@@ -316,8 +325,8 @@ def evaluate(max_steps = 200,
 
             # normalize observation
             nagent_poses = normalize_data(agent_poses, stats=stats['agent_pos'])
-            # images are already normalized to [0,1]
-            nimages = images
+            # env renders uint8 [0,255]; training data was scaled to [0,1]
+            nimages = images.astype(np.float32) / 255.0
 
             # device transfer
             nimages = torch.from_numpy(nimages).to(device, dtype=torch.float32)

@@ -1,7 +1,10 @@
 import numpy as np
 import torch
 from tiny_embodied_reasoning.workspace import utils as utils
-def preprocess(dataset_path,num_trajectories = None):
+def preprocess(dataset_path,num_trajectories = None,state_keys = ('agent',)):
+    """state_keys: which entities' positions to concatenate into the low-dim
+    state vector, e.g. ('agent',) -> 2-d, ('agent','o1') -> 4-d,
+    ('agent','o1','o2') -> 6-d (for state-based policies without vision)."""
     if dataset_path is None:
         return None
     scenes = utils.load_trajectories_pickle(dataset_path)
@@ -20,11 +23,13 @@ def preprocess(dataset_path,num_trajectories = None):
             states = traj.data
             for state in states:
                 obs_img = state.observation  # this should be shape (96, 96, 3)
-                agent_pos = state.state['agent']['position'] # extract first two dims as agent_pos
+                lowdim = np.concatenate([
+                    np.asarray(state.state[k]['position'], dtype=np.float32)[:2]
+                    for k in state_keys])
                 action = state.action      # (D,) action
 
                 all_images.append(obs_img)
-                all_states.append(agent_pos)
+                all_states.append(lowdim)
                 all_actions.append(action)
                 frame_idx += 1
 
@@ -137,15 +142,21 @@ def get_data_stats(data):
     return stats
 
 def normalize_data(data, stats):
+    # guard constant dimensions (e.g. all-zero rotation actions): range 0 -> 0
+    rng = stats['max'] - stats['min']
+    rng = np.where(rng == 0, 1.0, rng)
     # nomalize to [0,1]
-    ndata = (data - stats['min']) / (stats['max'] - stats['min'])
+    ndata = (data - stats['min']) / rng
     # normalize to [-1, 1]
     ndata = ndata * 2 - 1
+    ndata = np.where((stats['max'] - stats['min']) == 0, 0.0, ndata)
     return ndata
 
 def unnormalize_data(ndata, stats):
+    rng = stats['max'] - stats['min']
     ndata = (ndata + 1) / 2
-    data = ndata * (stats['max'] - stats['min']) + stats['min']
+    data = ndata * rng + stats['min']
+    data = np.where(rng == 0, stats['min'], data)
     return data
 
 # dataset
@@ -157,9 +168,12 @@ class PushTImageDataset(torch.utils.data.Dataset):
                  obs_horizon: int,
                  action_horizon: int,
                  rotate: bool = False,
-                 num_trajectories: int = None):
-        
+                 num_trajectories: int = None,
+                 state_keys: tuple = ('agent',)):
+
         assert len(dataset_paths) == len(text_conditions), "Each dataset must have a corresponding text condition."
+        assert not (rotate and len(state_keys) > 1), "rotate augmentation only supports agent-only state"
+        self.state_keys = state_keys
 
         all_image_data = []
         all_agent_pos = []
@@ -168,7 +182,7 @@ class PushTImageDataset(torch.utils.data.Dataset):
         all_text_conditions = []
 
         total_offset = 0  # to track episode ends across datasets
-        dataset_list = [preprocess(dataset_path,num_trajectories = num_trajectories) for dataset_path in dataset_paths]
+        dataset_list = [preprocess(dataset_path,num_trajectories = num_trajectories,state_keys = state_keys) for dataset_path in dataset_paths]
         for i, text_cond in enumerate(text_conditions):
             if rotate:
                 for j in range(4):
@@ -182,7 +196,7 @@ class PushTImageDataset(torch.utils.data.Dataset):
                     all_image_data.append(image_data)
 
                     # agent pos and action
-                    state_data = dataset_root['data']['state'][:,:2]
+                    state_data = dataset_root['data']['state']
                     action_data = dataset_root['data']['action'][:]
                     all_agent_pos.append(state_data)
                     all_action.append(action_data)
@@ -204,7 +218,7 @@ class PushTImageDataset(torch.utils.data.Dataset):
                 all_image_data.append(image_data)
 
                 # agent pos and action
-                state_data = dataset_root['data']['state'][:,:2]
+                state_data = dataset_root['data']['state']
                 action_data = dataset_root['data']['action'][:]
                 all_agent_pos.append(state_data)
                 all_action.append(action_data)
@@ -248,6 +262,15 @@ class PushTImageDataset(torch.utils.data.Dataset):
         normalized_train_data['image'] = all_image_data
         normalized_train_data['text'] = np.array(all_text_conditions)
 
+        # episode-relative start frame of each sample (for decision-frame
+        # weighting: early frames are where conditioning must break symmetry)
+        ep_starts = np.concatenate([[0], all_episode_ends[:-1]])
+        ep_idx = np.searchsorted(all_episode_ends, indices[:, 0], side='right')
+        self.rel_frame = (indices[:, 0] - ep_starts[ep_idx]).astype(np.int64)
+        # global episode index of each sample (for per-episode learned latents)
+        self.episode_idx = ep_idx.astype(np.int64)
+        self.n_episodes = len(all_episode_ends)
+
         self.indices = indices
         self.stats = stats
         self.normalized_train_data = normalized_train_data
@@ -273,6 +296,8 @@ class PushTImageDataset(torch.utils.data.Dataset):
         nsample['image'] = nsample['image'][:self.obs_horizon, :]
         nsample['agent_pos'] = nsample['agent_pos'][:self.obs_horizon, :]
         nsample['text'] = nsample['text'][0]  # text is constant for entire sequence
+        nsample['rel_frame'] = self.rel_frame[idx]
+        nsample['episode_idx'] = self.episode_idx[idx]
 
         return nsample
 import random

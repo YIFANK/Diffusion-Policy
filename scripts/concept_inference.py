@@ -41,7 +41,7 @@ CONCEPTS_DIR = '../output/concepts'
 PATH_LIST = [f'../dataset/{color}_{num}.pkl' for color in COLORS for num in [0,1,2,3]]
 DESCRIPTION_LIST = [f'push the {color} block to the {corner} corner' for color in COLORS_LOWER for corner in CORNER_NAMES]
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 
 def get_obs_cond_and_prediction(policy, nimage, nagent_pos, embeddings, uncond=False):
     """Helper function to get observation conditioning and model prediction."""
@@ -350,7 +350,9 @@ def infer_new_concepts(
     init_type: str = "rand",
     task: list = ['blue', 1],
     noise_pred_net_type: str = 'unet',
-    num_trajectories: int = None):
+    num_trajectories: int = None,
+    vision: bool = True,
+    state_keys: tuple = ('agent',)):
     """
     Infer new concept weights from demonstrations using frozen policy (diffusion or flow matching).
     """
@@ -361,10 +363,10 @@ def infer_new_concepts(
         policy = DiffusionPolicy(
             obs_horizon=OBS_HORIZON,
             pred_horizon=PRED_HORIZON,
-            lowdim_obs_dim=2,
+            lowdim_obs_dim=2 * len(state_keys),
             action_dim=ACTION_DIM,
             num_diffusion_iters=100,
-            vision=True,
+            vision=vision,
             text=True,
             cached_labels_path='../output/cached_labels.pkl',
             noise_pred_net_type=noise_pred_net_type
@@ -393,9 +395,14 @@ def infer_new_concepts(
     policy.eval()
     
     print("Loading new concept dataset...")
-    new_dataset = PushTImageDataset([new_concept_dataset_path], [0], 
-                                   pred_horizon=PRED_HORIZON, obs_horizon=OBS_HORIZON, 
-                                   action_horizon=ACTION_HORIZON, num_trajectories=num_trajectories)
+    # accept a single path or a list of paths (e.g. demos sharing one behavior
+    # factor across several tasks, for factorized concept inference)
+    paths = new_concept_dataset_path if isinstance(new_concept_dataset_path, list) \
+        else [new_concept_dataset_path]
+    new_dataset = PushTImageDataset(paths, [0] * len(paths),
+                                   pred_horizon=PRED_HORIZON, obs_horizon=OBS_HORIZON,
+                                   action_horizon=ACTION_HORIZON, num_trajectories=num_trajectories,
+                                   state_keys=state_keys)
     
     # Initialize concept embeddings and weights
     print(f"Initializing {init_type} concept embeddings")

@@ -67,7 +67,7 @@ def visualize_trajectories(actions,
     trajs = acts[idx]  # (n, Tp, 2)
 
     # ---- color palette --------------------------------------------------------
-    palette = plt.cm.get_cmap("tab10", n)
+    palette = plt.get_cmap("tab10", n)
 
     # ---- define fixed canvas size ---------------------------------------------
     figsize = (5, 5)

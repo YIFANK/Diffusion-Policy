@@ -148,3 +148,18 @@ Thumbs.db
 *.gif
 *.mp4
 *.avi
+# --- research materials: never push (paper anonymity / unpublished) ---
+paper/
+blog/
+output/
+logs/
+corl_2026_template_submission copy/
+*.pdf
+BLOG_DRAFT.md
+EXPERIMENTS.md
+MILESTONES.md
+OPEN_QUESTIONS.md
+REALROBOT_DEMO.md
+Original Proposal.md
+Paper Style Guide.md
+.DS_Store

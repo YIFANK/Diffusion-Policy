@@ -29,8 +29,13 @@ class DiffusionPolicy(nn.Module):
     def __init__(self, obs_horizon = 2, pred_horizon = 16,
                 lowdim_obs_dim = 2, action_dim = 2,num_diffusion_iters=100,
                 vision = False,text = True, cached_labels_path = '../output/cached_labels.pkl',
-                noise_pred_net_type = 'unet'):
+                noise_pred_net_type = 'unet', text_gate = False):
         super().__init__()
+        # text_gate: multiplicative FiLM of the vision features by the text
+        # embedding (vision_feats * (1 + tanh(g(text)))) in addition to the
+        # concat pathway — counteracts the 1028-vs-64 dim imbalance that lets
+        # the visual shortcut drown the text signal.
+        self.text_gate = text_gate
 
         # vision encoder
         vision_feature_dim = 0
@@ -56,9 +61,20 @@ class DiffusionPolicy(nn.Module):
             # for param in self.text_encoder.parameters():
             #     param.requires_grad = False  # freeze
             print("Using text encoder")
+            # infer the raw text-embedding dim from the cached labels
+            # (3584 for VLM2Vec, 512 for CLIP); fall back to 3584
+            text_input_dim = 3584
+            try:
+                with open(cached_labels_path, 'rb') as f:
+                    _labels = pickle.load(f)
+                if len(_labels) > 0:
+                    text_input_dim = next(iter(_labels.values())).shape[-1]
+            except FileNotFoundError:
+                pass
+            print(f"Text embedding input dim: {text_input_dim}")
             #use linear projection as text encoder
             self.text_encoder = nn.Sequential(
-                nn.Linear(3584,128),
+                nn.Linear(text_input_dim,128),
                 nn.ReLU(),
                 nn.Linear(128, 128),
                 nn.ReLU(),
@@ -68,9 +84,12 @@ class DiffusionPolicy(nn.Module):
             )
             text_feature_dim = 64
             self.text_feature_dim = 64
+            if text_gate and vision:
+                self.text_gate_net = nn.Sequential(
+                    nn.Linear(64, 128), nn.ReLU(), nn.Linear(128, 512), nn.Tanh())
         obs_dim = vision_feature_dim + lowdim_obs_dim
-        lowdim_obs_dim = 2
-        action_dim = 2
+        # (historical hardcode of lowdim_obs_dim/action_dim to 2 removed —
+        # robosuite uses 7-d actions; constructor args are authoritative)
 
         self.obs_horizon, self.pred_horizon = obs_horizon, pred_horizon
         self.obs_dim = obs_dim
@@ -119,8 +138,8 @@ class DiffusionPolicy(nn.Module):
                 raise KeyError(f"Text '{e.args[0]}' not found in cached labels")
             text_emb = torch.cat(text_emb, dim=0)
         # print(text_emb.shape)
-        # Ensure float type
-        text_emb = text_emb.float()
+        # Ensure float type and move to the encoder's device
+        text_emb = text_emb.float().to(next(self.text_encoder.parameters()).device)
         # Project through linear layer
         text_emb = self.text_encoder(text_emb)
         
@@ -132,16 +151,9 @@ class DiffusionPolicy(nn.Module):
         Get conditioning features for inference.
         """
         B = nimage.shape[0]
-        if self.vision:
-            image_features = self.vision_encoder(nimage.flatten(end_dim=1))
-            image_features = image_features.reshape(B, self.obs_horizon, -1)
-            obs_features = torch.cat([image_features, nagent_pos], dim=-1)
-            obs_cond = obs_features.flatten(start_dim=1)
-        else:
-            obs_features = nagent_pos
-            obs_cond = obs_features.flatten(start_dim=1)
+        # resolve the text embedding first (the gate needs it before fusion)
+        text_emb = None
         if self.text:
-            #tokenize text
             if uncond or ntext is None:
                 text_emb = torch.zeros(B, self.text_feature_dim, device=nimage.device)
             else:
@@ -149,10 +161,24 @@ class DiffusionPolicy(nn.Module):
                     text_emb = self.encode_text(ntext)
                 else:
                     text_emb = ntext
-            obs_cond = torch.cat([obs_cond, text_emb], dim=-1) 
+        if self.vision:
+            image_features = self.vision_encoder(nimage.flatten(end_dim=1))
+            image_features = image_features.reshape(B, self.obs_horizon, -1)
+            if self.text_gate and text_emb is not None:
+                # multiplicative text modulation of the vision features
+                gate = 1.0 + self.text_gate_net(text_emb).unsqueeze(1)  # (B,1,512)
+                image_features = image_features * gate
+            obs_features = torch.cat([image_features, nagent_pos], dim=-1)
+            obs_cond = obs_features.flatten(start_dim=1)
+        else:
+            obs_features = nagent_pos
+            obs_cond = obs_features.flatten(start_dim=1)
+        if self.text:
+            obs_cond = torch.cat([obs_cond, text_emb], dim=-1)
         return obs_cond
     # -------------- training -------------------------------------------------
-    def forward(self, nimage, nagent_pos, naction, ntext = None, p_uncond = 0.1):
+    def forward(self, nimage, nagent_pos, naction, ntext = None, p_uncond = 0.1,
+                sample_weights = None):
         """
         nimage: shape (B, obs_horizon, C, H, W)
         nagent_pos: shape (B, obs_horizon, 2)
@@ -193,8 +219,14 @@ class DiffusionPolicy(nn.Module):
             noisy_actions, timesteps, global_cond=obs_cond
         )
 
-        # Compute loss
-        loss = F.mse_loss(noise_pred, noise)
+        # Compute loss (optionally per-sample weighted, e.g. to upweight
+        # decision-point frames where conditioning carries the signal)
+        if sample_weights is None:
+            loss = F.mse_loss(noise_pred, noise)
+        else:
+            per = F.mse_loss(noise_pred, noise, reduction='none').mean(dim=(1, 2))
+            w = sample_weights.to(per.device).float()
+            loss = (per * w).sum() / w.sum()
 
         return loss
 
